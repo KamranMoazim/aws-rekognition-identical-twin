@@ -6,7 +6,7 @@ import { HttpError } from './http.js';
  * Small HMAC-signed tokens: "<base64url json>.<base64url sig>".
  * kind keeps one token type from being replayed as another.
  */
-export type TokenKind = 'session' | 'match' | 'claim';
+export type TokenKind = 'session' | 'match' | 'claim' | 'pin';
 
 type Envelope = { kind: TokenKind; exp: number };
 

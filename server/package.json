@@ -9,8 +9,9 @@
     "typecheck": "tsc --noEmit",
     "test:claims": "tsx test/claims.test.ts",
     "test:rules": "tsx test/copresence-rules.test.ts",
-    "test": "npm run test:rules && npm run test:claims && npm run test:copresence",
-    "test:copresence": "tsx test/copresence.test.ts"
+    "test": "npm run test:rules && npm run test:claims && npm run test:copresence && npm run test:pins",
+    "test:copresence": "tsx test/copresence.test.ts",
+    "test:pins": "tsx test/pins.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-rekognition": "^3.1127.0",

@@ -22,8 +22,8 @@ Core idea: faces cannot prove two people exist, but two live faces in the same f
 | 2 | Register + login with Face Liveness, React client | done |
 | 3 | Claims: state machine, expiry, owner confirm | done |
 | 4 | Co-presence check: challenge, joint capture, pass rules | done |
-| 5 | PIN set + PIN login for collision groups | next |
-| 6 | Hardening: recovery, throttles, races, review queue | |
+| 5 | PIN set + PIN login for collision groups | done |
+| 6 | Hardening: third lookalike, repeat-claim limits, cross-device resume, review queue | next |
 
 ## Run (step 1)
 
@@ -121,6 +121,36 @@ Note: after a pass, both people's face logins return `pin_required` until step 5
 | POST | /claims/:id/liveness | `{role, sessionId}` -> spend it; both passed moves claim to both_live |
 | POST | /claims/:id/challenge | Random sides + poses, valid 60 s, single use |
 | POST | /claims/:id/joint-capture | `{image: base64 jpeg}` -> pass (identity, recovery code, session) or fail (reasons, angles, attempts left) |
+
+## Run (step 5)
+
+```bash
+npm run server:dev                      # applies migration 004
+npm --prefix server test                # rules 19 + claims 21 + co-presence 22 + pins 35
+```
+
+How login works now:
+
+| Face matches | Result |
+| --- | --- |
+| one identity, not in a group | logged in by face (as before) |
+| a collision group member | `pin_required` + 5-minute PIN token; PIN picks the member |
+| several unrelated identities, or a group plus a stray identity | refused (`ambiguous_match`), never guessed |
+
+- **First PIN:** the claimant is signed in after the co-presence pass and sees "Set your PIN now". The owner logs in by face, gets the PIN step, and uses "No PIN yet / forgot it" with their recovery code.
+- **Forgot PIN:** face + recovery code + new PIN. The recovery code is then replaced (shown once). A face alone never resets a PIN.
+- **Uniqueness:** members of one group cannot share a PIN (checked at set time with the group row locked; parallel identical PINs: exactly one wins). Weak PINs (repeated or sequential digits) are refused.
+- **Throttle, not lockout:** 5 wrong PINs or recovery codes for a group in 15 minutes pause that group's PIN logins. No member's account is ever locked by someone else's guesses.
+
+### API (step 5)
+
+| Method | Path | Does |
+| --- | --- | --- |
+| POST | /login | now returns `{status: "pin_required", pinToken}` for group members |
+| POST | /login/pin | `{pinToken, pin}` -> session |
+| POST | /login/recovery | `{pinToken, recoveryCode, newPin}` -> session + new recovery code |
+| GET | /me | adds `hasPin`, `needsPin` |
+| POST | /me/pin | `{pin, currentPin?}` set or change |
 
 ## Tear down
 

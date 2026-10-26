@@ -3,6 +3,7 @@ import { api, errorBody, type ApiError, type Identity } from './api';
 import { ClaimStatus, type StoredClaim } from './ClaimStatus';
 import { Liveness } from './Liveness';
 import { OwnerClaims } from './OwnerClaims';
+import { PinLogin, PinSetup } from './Pin';
 import { store } from './storage';
 
 type View =
@@ -13,6 +14,8 @@ type View =
   | { name: 'working'; label: string }
   | { name: 'registered'; identity: Identity; recoveryCode: string }
   | { name: 'match'; topSimilarity: number; matchToken: string; displayName: string }
+  | { name: 'pin'; pinToken: string }
+  | { name: 'new-code'; recoveryCode: string }
   | { name: 'error'; error: ApiError };
 
 const TOKEN_KEY = 'twin.sessionToken';
@@ -24,15 +27,21 @@ export function App({ region }: { region: string }) {
   // Persistent: closing the window must not orphan a claim (it would block new claims for 24 h).
   const [claim, setClaim] = useState<StoredClaim | null>(() => store.get<StoredClaim>(CLAIM_KEY, true));
   const [me, setMe] = useState<Identity | null>(null);
+  const [pinState, setPinState] = useState({ hasPin: false, needsPin: false });
+  const [showChangePin, setShowChangePin] = useState(false);
   const [name, setName] = useState('');
 
-  useEffect(() => {
+  function loadMe() {
     if (!token) return setMe(null);
     api
       .me(token)
-      .then((r) => setMe(r.identity))
+      .then((r) => {
+        setMe(r.identity);
+        setPinState({ hasPin: r.hasPin, needsPin: r.needsPin });
+      })
       .catch(() => signOut());
-  }, [token]);
+  }
+  useEffect(loadMe, [token]);
 
   function signIn(newToken: string) {
     store.set(TOKEN_KEY, newToken);
@@ -65,6 +74,7 @@ export function App({ region }: { region: string }) {
     setView({ name: 'working', label: 'Looking you up...' });
     try {
       const r = await api.login(sessionId);
+      if (r.status === 'pin_required') return setView({ name: 'pin', pinToken: r.pinToken });
       signIn(r.sessionToken);
       setView({ name: 'home' });
     } catch (err) {
@@ -87,7 +97,7 @@ export function App({ region }: { region: string }) {
     <main>
       <header>
         <h1>Twin Resolver</h1>
-        <p className="muted">Step 4: co-presence check (two live faces, one frame)</p>
+        <p className="muted">Step 5: PINs for collision groups</p>
       </header>
 
       {claim && <ClaimStatus stored={claim} region={region} onSignedIn={signIn} onDone={() => keepClaim(null)} />}
@@ -104,8 +114,28 @@ export function App({ region }: { region: string }) {
               <dt>Created</dt>
               <dd>{new Date(me.createdAt).toLocaleString()}</dd>
             </dl>
-            <button onClick={signOut}>Sign out</button>
+            <div className="row">
+              <button onClick={signOut}>Sign out</button>
+              {pinState.hasPin && (
+                <button className="secondary" onClick={() => setShowChangePin((v) => !v)}>
+                  {showChangePin ? 'Close' : 'Change PIN'}
+                </button>
+              )}
+            </div>
+            {showChangePin && pinState.hasPin && (
+              <PinSetup token={token} hasPin onDone={() => setShowChangePin(false)} />
+            )}
           </section>
+          {pinState.needsPin && (
+            <section className="card warn">
+              <h2>Set your PIN now</h2>
+              <p className="muted">
+                You share a face with another member of your collision group. From now on, logging in is face + PIN.
+                Without a PIN you can only get back in with your recovery code.
+              </p>
+              <PinSetup token={token} hasPin={false} onDone={loadMe} />
+            </section>
+          )}
           <OwnerClaims token={token} />
         </>
       )}
@@ -157,6 +187,26 @@ export function App({ region }: { region: string }) {
       )}
 
       {view.name === 'working' && <p className="muted">{view.label}</p>}
+
+      {view.name === 'pin' && (
+        <PinLogin
+          pinToken={view.pinToken}
+          onCancel={() => setView({ name: 'home' })}
+          onLoggedIn={(r, newCode) => {
+            signIn(r.sessionToken);
+            setView(newCode ? { name: 'new-code', recoveryCode: newCode } : { name: 'home' });
+          }}
+        />
+      )}
+
+      {view.name === 'new-code' && (
+        <section className="card ok">
+          <h2>New recovery code</h2>
+          <p>Your old recovery code no longer works. Save this one; it is shown only once.</p>
+          <p className="code">{view.recoveryCode}</p>
+          <button onClick={() => setView({ name: 'home' })}>I saved it</button>
+        </section>
+      )}
 
       {view.name === 'registered' && (
         <section className="card ok">

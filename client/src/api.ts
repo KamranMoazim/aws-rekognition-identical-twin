@@ -46,6 +46,9 @@ export type JointResult =
 
 export const ACTIVE_CLAIM_STATES: ClaimView['state'][] = ['open', 'owner_confirmed', 'both_live', 'challenged'];
 
+export type LoggedIn = { status: 'logged_in'; identity: Identity; sessionToken: string };
+export type LoginResult = LoggedIn | { status: 'pin_required'; message: string; pinToken: string };
+
 export type ApiError = { error: string; message: string; [k: string]: unknown };
 
 /** Throws the server's JSON error body (with .status) on non-2xx. */
@@ -80,9 +83,12 @@ export const api = {
       sessionId,
       displayName,
     }),
-  login: (sessionId: string) =>
-    post<{ status: 'logged_in'; identity: Identity; sessionToken: string }>('/login', { sessionId }),
-  me: (token: string) => call<{ identity: Identity }>('/me', {}, token),
+  login: (sessionId: string) => post<LoginResult>('/login', { sessionId }),
+  loginPin: (pinToken: string, pin: string) => post<LoggedIn>('/login/pin', { pinToken, pin }),
+  loginRecovery: (pinToken: string, recoveryCode: string, newPin: string) =>
+    post<LoggedIn & { recoveryCode: string }>('/login/recovery', { pinToken, recoveryCode, newPin }),
+  me: (token: string) => call<{ identity: Identity; hasPin: boolean; needsPin: boolean }>('/me', {}, token),
+  setPin: (token: string, pin: string, currentPin?: string) => post<{ ok: true }>('/me/pin', { pin, currentPin }, token),
 
   // Claims: the claimant (no account) uses a claim token, the owner uses their session.
   openClaim: (matchToken: string, claimantName: string) =>
