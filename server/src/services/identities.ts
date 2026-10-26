@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { pool, tx } from '../db.js';
 import { audit } from '../lib/audit.js';
 import { HttpError } from '../lib/http.js';
-import { hashSecret, newRecoveryCode } from '../lib/secrets.js';
+import { hashSecret, newRecoveryCode, verifySecret } from '../lib/secrets.js';
 import { deleteFaces, indexFace, searchByFaceId, type IdentityMatch } from './faces.js';
 
 export type Identity = {
@@ -79,4 +79,51 @@ export async function createIdentity(displayName: string, faceBytes: Uint8Array)
     throw err;
   }
   return { kind: 'created', identity: await getIdentity(identityId), recoveryCode };
+}
+
+const MAX_CODE_FAILS = 5;
+const CODE_LOCK_MINUTES = 15;
+
+/**
+ * Check an identity's recovery code with a per-identity lockout.
+ * The counter update must commit even when the code is wrong, so the
+ * transaction returns a verdict and we throw only after it commits.
+ */
+export async function verifyRecoveryCode(identityId: string, code: string): Promise<void> {
+  const verdict = await tx(async (c) => {
+    const row = (
+      await c.query(
+        `select recovery_code_hash, failed_attempts, locked_until > now() as locked
+           from credentials where identity_id = $1 for update`,
+        [identityId],
+      )
+    ).rows[0];
+    if (!row) return { ok: false as const, reason: 'no_credentials' as const };
+    if (row.locked) return { ok: false as const, reason: 'locked' as const };
+
+    if (await verifySecret(code.trim().toUpperCase(), row.recovery_code_hash)) {
+      await c.query('update credentials set failed_attempts = 0, locked_until = null where identity_id = $1', [identityId]);
+      return { ok: true as const };
+    }
+
+    const fails = row.failed_attempts + 1;
+    if (fails >= MAX_CODE_FAILS) {
+      await c.query(
+        `update credentials set failed_attempts = 0,
+                locked_until = now() + make_interval(mins => $2) where identity_id = $1`,
+        [identityId, CODE_LOCK_MINUTES],
+      );
+      await audit('recovery_code.locked', { identityId }, c);
+      return { ok: false as const, reason: 'locked' as const };
+    }
+    await c.query('update credentials set failed_attempts = $2 where identity_id = $1', [identityId, fails]);
+    return { ok: false as const, reason: 'wrong' as const, attemptsLeft: MAX_CODE_FAILS - fails };
+  });
+
+  if (verdict.ok) return;
+  if (verdict.reason === 'locked') {
+    throw new HttpError(423, 'code_locked', `Too many wrong codes. Try again in ${CODE_LOCK_MINUTES} minutes.`);
+  }
+  if (verdict.reason === 'no_credentials') throw new HttpError(404, 'no_credentials', 'No credentials for identity');
+  throw new HttpError(403, 'wrong_code', 'Recovery code is wrong', { attemptsLeft: verdict.attemptsLeft });
 }

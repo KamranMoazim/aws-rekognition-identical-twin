@@ -24,6 +24,7 @@ export function currentIdentityId(req: Request): string {
  */
 function matchResponse(matches: IdentityMatch[]) {
   return {
+    error: 'face_match',
     status: 'match' as const,
     message: 'This face matches an existing identity.',
     matchToken: issueToken('match', { identityIds: matches.map((m) => m.identityId) }, MATCH_TTL),

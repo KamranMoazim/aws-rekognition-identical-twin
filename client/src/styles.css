@@ -32,3 +32,6 @@ dd { margin: 0; overflow-wrap: anywhere; }
 code { font-size: 13px; }
 .code { font: 600 22px ui-monospace, monospace; letter-spacing: 2px; }
 .liveness { margin: 16px 0; }
+.badge { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: #e4e8ee; color: var(--text); vertical-align: middle; }
+.claim { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+.claim .row input { flex: 1; min-width: 200px; }

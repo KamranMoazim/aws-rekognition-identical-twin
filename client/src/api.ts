@@ -6,15 +6,35 @@ export type Identity = {
   groupId: string | null;
 };
 
+export type ClaimView = {
+  id: string;
+  state: 'open' | 'owner_confirmed' | 'both_live' | 'challenged' | 'resolved' | 'review' | 'expired' | 'cancelled';
+  claimantName: string;
+  nextStep: string;
+  expiresAt: string;
+  createdAt: string;
+  ownerConfirmedAt: string | null;
+  reviewReason: string | null;
+  closedAt: string | null;
+};
+
+export const ACTIVE_CLAIM_STATES: ClaimView['state'][] = ['open', 'owner_confirmed', 'both_live', 'challenged'];
+
 export type ApiError = { error: string; message: string; [k: string]: unknown };
 
 /** Throws the server's JSON error body (with .status) on non-2xx. */
-async function call<T>(path: string, init: RequestInit = {}, token?: string | null): Promise<T> {
+async function call<T>(
+  path: string,
+  init: RequestInit = {},
+  token?: string | null,
+  extraHeaders: Record<string, string> = {},
+): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
     headers: {
       'content-type': 'application/json',
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...extraHeaders,
     },
   });
   const body = await res.json().catch(() => ({}));
@@ -37,10 +57,30 @@ export const api = {
   login: (sessionId: string) =>
     post<{ status: 'logged_in'; identity: Identity; sessionToken: string }>('/login', { sessionId }),
   me: (token: string) => call<{ identity: Identity }>('/me', {}, token),
+
+  // Claims: the claimant (no account) uses a claim token, the owner uses their session.
+  openClaim: (matchToken: string, claimantName: string) =>
+    post<{ claim: ClaimView; claimToken: string }>('/claims', { matchToken, claimantName }),
+  claimAsClaimant: (id: string, claimToken: string) =>
+    call<{ claim: ClaimView }>(`/claims/${id}`, {}, null, { 'x-claim-token': claimToken }),
+  cancelClaim: (id: string, claimToken: string) =>
+    call<{ claim: ClaimView }>(`/claims/${id}`, { method: 'DELETE' }, null, { 'x-claim-token': claimToken }),
+  myClaims: (token: string) => call<{ claims: ClaimView[] }>('/me/claims', {}, token),
+  ownerConfirm: (id: string, recoveryCode: string, token: string) =>
+    post<{ claim: ClaimView }>(`/claims/${id}/owner-confirm`, { recoveryCode }, token),
+  ownerDecline: (id: string, token: string) => post<{ claim: ClaimView }>(`/claims/${id}/owner-decline`, {}, token),
+  ownerCancel: (id: string, token: string) => post<{ claim: ClaimView }>(`/claims/${id}/owner-cancel`, {}, token),
 };
 
-/** Pull the server's error body out of a thrown fetch error. */
+/** Pull the server's error body out of a thrown fetch error (keeps every field, e.g. matchToken). */
 export function errorBody(err: unknown): ApiError {
-  const e = err as { body?: ApiError; message?: string };
-  return e.body?.error ? e.body : { error: 'network', message: e.message ?? String(err) };
+  const e = err as { body?: Record<string, unknown>; message?: string };
+  if (e.body && Object.keys(e.body).length) {
+    return {
+      ...e.body,
+      error: String(e.body.error ?? e.body.status ?? 'error'),
+      message: String(e.body.message ?? e.message ?? ''),
+    };
+  }
+  return { error: 'network', message: e.message ?? String(err) };
 }

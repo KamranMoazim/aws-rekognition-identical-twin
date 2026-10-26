@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { api, errorBody, type ApiError, type Identity } from './api';
+import { ClaimStatus, type StoredClaim } from './ClaimStatus';
 import { Liveness } from './Liveness';
+import { OwnerClaims } from './OwnerClaims';
+import { store } from './storage';
 
 type View =
   | { name: 'home' }
@@ -9,30 +12,17 @@ type View =
   | { name: 'login-liveness' }
   | { name: 'working'; label: string }
   | { name: 'registered'; identity: Identity; recoveryCode: string }
-  | { name: 'match'; topSimilarity: number }
+  | { name: 'match'; topSimilarity: number; matchToken: string; displayName: string }
   | { name: 'error'; error: ApiError };
 
 const TOKEN_KEY = 'twin.sessionToken';
-
-function loadToken(): string | null {
-  try {
-    return sessionStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-function saveToken(token: string | null) {
-  try {
-    if (token) sessionStorage.setItem(TOKEN_KEY, token);
-    else sessionStorage.removeItem(TOKEN_KEY);
-  } catch {
-    /* storage blocked: stay logged in for this page only */
-  }
-}
+const CLAIM_KEY = 'twin.claim';
 
 export function App({ region }: { region: string }) {
   const [view, setView] = useState<View>({ name: 'home' });
-  const [token, setToken] = useState<string | null>(loadToken);
+  const [token, setToken] = useState<string | null>(() => store.get<string>(TOKEN_KEY));
+  // Persistent: closing the window must not orphan a claim (it would block new claims for 24 h).
+  const [claim, setClaim] = useState<StoredClaim | null>(() => store.get<StoredClaim>(CLAIM_KEY, true));
   const [me, setMe] = useState<Identity | null>(null);
   const [name, setName] = useState('');
 
@@ -45,13 +35,17 @@ export function App({ region }: { region: string }) {
   }, [token]);
 
   function signIn(newToken: string) {
-    saveToken(newToken);
+    store.set(TOKEN_KEY, newToken);
     setToken(newToken);
   }
   function signOut() {
-    saveToken(null);
+    store.set(TOKEN_KEY, null);
     setToken(null);
     setView({ name: 'home' });
+  }
+  function keepClaim(c: StoredClaim | null) {
+    store.set(CLAIM_KEY, c, true);
+    setClaim(c);
   }
 
   async function finishRegister(sessionId: string, displayName: string) {
@@ -62,8 +56,8 @@ export function App({ region }: { region: string }) {
       setView({ name: 'registered', identity: r.identity, recoveryCode: r.recoveryCode });
     } catch (err) {
       const body = errorBody(err);
-      if (body.error === 'network' || !('matchToken' in body)) return setView({ name: 'error', error: body });
-      setView({ name: 'match', topSimilarity: Number(body.topSimilarity) });
+      if (typeof body.matchToken !== 'string') return setView({ name: 'error', error: body });
+      setView({ name: 'match', topSimilarity: Number(body.topSimilarity), matchToken: body.matchToken, displayName });
     }
   }
 
@@ -78,26 +72,42 @@ export function App({ region }: { region: string }) {
     }
   }
 
+  async function startClaim(matchToken: string, claimantName: string) {
+    setView({ name: 'working', label: 'Opening your claim...' });
+    try {
+      const r = await api.openClaim(matchToken, claimantName);
+      keepClaim({ claimId: r.claim.id, claimToken: r.claimToken });
+      setView({ name: 'home' });
+    } catch (err) {
+      setView({ name: 'error', error: errorBody(err) });
+    }
+  }
+
   return (
     <main>
       <header>
         <h1>Twin Resolver</h1>
-        <p className="muted">Step 2: register and log in with Face Liveness</p>
+        <p className="muted">Step 3: claims ("this is not me"), owner confirm, expiry</p>
       </header>
 
-      {me && (
-        <section className="card ok">
-          <h2>Signed in as {me.displayName}</h2>
-          <dl>
-            <dt>Identity</dt>
-            <dd><code>{me.id}</code></dd>
-            <dt>Collision group</dt>
-            <dd>{me.groupId ? <code>{me.groupId}</code> : 'none'}</dd>
-            <dt>Created</dt>
-            <dd>{new Date(me.createdAt).toLocaleString()}</dd>
-          </dl>
-          <button onClick={signOut}>Sign out</button>
-        </section>
+      {claim && <ClaimStatus stored={claim} onDone={() => keepClaim(null)} />}
+
+      {me && token && (
+        <>
+          <section className="card ok">
+            <h2>Signed in as {me.displayName}</h2>
+            <dl>
+              <dt>Identity</dt>
+              <dd><code>{me.id}</code></dd>
+              <dt>Collision group</dt>
+              <dd>{me.groupId ? <code>{me.groupId}</code> : 'none'}</dd>
+              <dt>Created</dt>
+              <dd>{new Date(me.createdAt).toLocaleString()}</dd>
+            </dl>
+            <button onClick={signOut}>Sign out</button>
+          </section>
+          <OwnerClaims token={token} />
+        </>
       )}
 
       {view.name === 'home' && !me && (
@@ -138,12 +148,7 @@ export function App({ region }: { region: string }) {
       )}
 
       {view.name === 'login-liveness' && (
-        <Liveness
-          purpose="login"
-          region={region}
-          onComplete={finishLogin}
-          onCancel={() => setView({ name: 'home' })}
-        />
+        <Liveness purpose="login" region={region} onComplete={finishLogin} onCancel={() => setView({ name: 'home' })} />
       )}
 
       {view.name === 'working' && <p className="muted">{view.label}</p>}
@@ -151,7 +156,7 @@ export function App({ region }: { region: string }) {
       {view.name === 'registered' && (
         <section className="card ok">
           <h2>Identity created</h2>
-          <p>Save your recovery code. It is shown only once and is needed to reset a PIN later.</p>
+          <p>Save your recovery code. It is shown only once. You need it to confirm a claim or reset a PIN later.</p>
           <p className="code">{view.recoveryCode}</p>
           <button onClick={() => setView({ name: 'home' })}>I saved it</button>
         </section>
@@ -161,15 +166,19 @@ export function App({ region }: { region: string }) {
         <section className="card warn">
           <h2>This face is already registered</h2>
           <p>
-            Your face matches an existing identity (similarity {view.topSimilarity}%). No new identity was
-            created.
+            Your face matches an existing identity (similarity {view.topSimilarity}%). No new identity was created.
+          </p>
+          <p className="muted">
+            If that account is not yours (for example you have an identical twin), open a claim. The account owner
+            must confirm it, then you both do a joint camera check.
           </p>
           <div className="row">
-            <button disabled title="Built in step 3">This is not me (step 3)</button>
-            <button className="secondary" onClick={() => setView({ name: 'login-liveness' })}>
-              It is me, log in
+            <button onClick={() => startClaim(view.matchToken, view.displayName)} disabled={!!claim}>
+              This is not me, open a claim
             </button>
+            <button className="secondary" onClick={() => setView({ name: 'login-liveness' })}>It is me, log in</button>
           </div>
+          {claim && <p className="muted">You already have a claim in progress.</p>}
         </section>
       )}
 
@@ -177,6 +186,9 @@ export function App({ region }: { region: string }) {
         <section className="card error">
           <h2>{view.error.error}</h2>
           <p>{view.error.message}</p>
+          {typeof view.error.expiresAt === 'string' && (
+            <p className="muted">Expires {new Date(view.error.expiresAt).toLocaleString()}</p>
+          )}
           <button onClick={() => setView({ name: 'home' })}>Back</button>
         </section>
       )}

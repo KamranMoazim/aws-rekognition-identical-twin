@@ -6,6 +6,8 @@ import { config } from './config.js';
 import { migrate, pool } from './db.js';
 import { errorHandler } from './lib/http.js';
 import { authRouter } from './routes/auth.js';
+import { claimsRouter } from './routes/claims.js';
+import { expireDueClaims } from './services/claims.js';
 
 const app = express();
 app.use(cors({ origin: config.clientOrigin }));
@@ -35,10 +37,18 @@ app.get('/config', (_req, res) => {
 });
 
 app.use(authRouter);
+app.use(claimsRouter);
 app.use(errorHandler);
 
 const applied = await migrate();
 if (applied.length) console.log(`migrations applied: ${applied.join(', ')}`);
+
+// Expiry sweeper: abandoned claims never lock anyone out.
+setInterval(() => {
+  expireDueClaims()
+    .then((n) => n && console.log(`expired ${n} claim(s)`))
+    .catch((e) => console.error('sweeper failed', e));
+}, 60_000);
 
 app.listen(config.port, () => {
   console.log(`twin-resolver server on http://localhost:${config.port}`);
