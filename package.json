@@ -3,13 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "install:all": "npm --prefix infra install && npm --prefix server install",
+    "install:all": "npm --prefix infra install && npm --prefix server install && npm --prefix client install",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "db:reset": "docker compose down -v && docker compose up -d",
     "db:psql": "docker compose exec postgres psql -U twin twin",
     "infra:deploy": "npm --prefix infra run deploy",
     "infra:destroy": "npm --prefix infra run destroy",
-    "server:dev": "npm --prefix server run dev"
+    "server:dev": "npm --prefix server run dev",
+    "client:dev": "npm --prefix client run dev"
   }
 }

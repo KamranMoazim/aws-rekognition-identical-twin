@@ -4,12 +4,14 @@ import express from 'express';
 import { rekognition } from './aws.js';
 import { config } from './config.js';
 import { migrate, pool } from './db.js';
+import { errorHandler } from './lib/http.js';
+import { authRouter } from './routes/auth.js';
 
 const app = express();
 app.use(cors({ origin: config.clientOrigin }));
 app.use(express.json({ limit: '10mb' })); // joint-capture frames arrive as base64
 
-/** Step 1 check: Postgres reachable, migrations applied, Rekognition collection reachable. */
+/** Postgres reachable, migrations applied, Rekognition collection reachable. */
 app.get('/health', async (_req, res) => {
   const db = await pool
     .query<{ tables: number }>(
@@ -32,9 +34,13 @@ app.get('/config', (_req, res) => {
   res.json({ region: config.region, identityPoolId: config.identityPoolId });
 });
 
+app.use(authRouter);
+app.use(errorHandler);
+
 const applied = await migrate();
 if (applied.length) console.log(`migrations applied: ${applied.join(', ')}`);
 
 app.listen(config.port, () => {
   console.log(`twin-resolver server on http://localhost:${config.port}`);
+  console.log(`face match threshold ${config.faceMatchThreshold}, liveness min ${config.livenessMinConfidence}`);
 });

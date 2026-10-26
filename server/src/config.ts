@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -36,5 +37,7 @@ export const config = {
   identityPoolId: cdk.IdentityPoolId ?? process.env.IDENTITY_POOL_ID ?? '',
   faceMatchThreshold: Number(process.env.FACE_MATCH_THRESHOLD ?? 90),
   livenessMinConfidence: Number(process.env.LIVENESS_MIN_CONFIDENCE ?? 90),
+  // Signs session and match tokens. Random per process if unset (tokens die on restart).
+  tokenSecret: process.env.TOKEN_SECRET || randomBytes(32).toString('hex'),
   migrationsDir: path.join(serverRoot, 'migrations'),
 };
