@@ -1,0 +1,21 @@
+{
+  "name": "twin-resolver-infra",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy --require-approval never --outputs-file cdk-outputs.json",
+    "destroy": "cdk destroy --force"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "aws-cdk": "^2.1126.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.230.0",
+    "constructs": "^10.4.2"
+  }
+}

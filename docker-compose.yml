@@ -1,0 +1,21 @@
+# Reuses postgres:16 (already used by sms-campaign-platform and reviewer-platform).
+services:
+  postgres:
+    image: postgres:16
+    container_name: twin-postgres
+    environment:
+      POSTGRES_USER: twin
+      POSTGRES_PASSWORD: twin
+      POSTGRES_DB: twin
+    ports:
+      - "5434:5432"
+    volumes:
+      - twin-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U twin -d twin"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  twin-pg:
