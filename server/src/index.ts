@@ -8,6 +8,7 @@ import { errorHandler } from './lib/http.js';
 import { authRouter } from './routes/auth.js';
 import { claimsRouter } from './routes/claims.js';
 import { copresenceRouter } from './routes/copresence.js';
+import { adminRouter } from './routes/admin.js';
 import { expireDueClaims } from './services/claims.js';
 
 const app = express();
@@ -40,6 +41,7 @@ app.get('/config', (_req, res) => {
 app.use(authRouter);
 app.use(claimsRouter);
 app.use(copresenceRouter);
+app.use(adminRouter);
 app.use(errorHandler);
 
 const applied = await migrate();

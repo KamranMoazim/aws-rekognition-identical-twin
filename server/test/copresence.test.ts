@@ -74,7 +74,7 @@ async function owner(name: string, faceId: string) {
   return id;
 }
 async function confirmedClaim(targetId: string, claimant: string) {
-  const c = await openClaim([targetId], claimant);
+  const { claim: c } = await openClaim([targetId], claimant);
   await move(c.id, ['open'], 'owner_confirmed', { auditType: 'test.confirm' });
   return c.id;
 }
@@ -96,7 +96,7 @@ try {
     await expectError(cp.finishClaimLiveness(c1, 'claimant', sOwner), 'liveness_invalid'));
   const sOwner2 = await cp.startClaimLiveness(c1, 'owner');
   let r = await cp.finishClaimLiveness(c1, 'owner', sOwner2);
-  check('owner liveness passes, claim still owner_confirmed', r.liveness.owner && !r.liveness.claimant && r.claim.state === 'owner_confirmed', r);
+  check('owner liveness passes, claim still owner_confirmed', r.liveness.owners === 1 && !r.liveness.claimant && r.claim.state === 'owner_confirmed', r);
 
   fake.searchFaceIds = () => [];
   const sStranger = await cp.startClaimLiveness(c1, 'claimant');
@@ -107,13 +107,17 @@ try {
   const sClaimant = await cp.startClaimLiveness(c1, 'claimant');
   r = await cp.finishClaimLiveness(c1, 'claimant', sClaimant);
   check('both passed -> both_live', r.claim.state === 'both_live', r);
-  check('spent session cannot be replayed', await expectError(cp.finishClaimLiveness(c1, 'claimant', sClaimant), 'liveness_invalid'));
+  check('spent session cannot be replayed',
+    (await expectError(cp.finishClaimLiveness(c1, 'claimant', sClaimant), 'liveness_invalid')) ||
+      (await expectError(cp.finishClaimLiveness(c1, 'claimant', sClaimant), 'claimant_done')));
+  check('a fresh claimant session after passing is refused (claimant_done)',
+    await expectError(cp.startClaimLiveness(c1, 'claimant').then((s) => cp.finishClaimLiveness(c1, 'claimant', s)), 'claimant_done'));
 
   // ---- joint capture: PASS
   let ch = await cp.issueChallenge(c1);
-  check('challenge issued -> challenged', ch.claim.state === 'challenged' && ch.challenge.left !== ch.challenge.right, ch);
-  const poses = ch.challenge;
-  fake.detect = () => [faceDetail(0.15, POSE_ANGLES[poses.left]!), faceDetail(0.6, POSE_ANGLES[poses.right]!)];
+  check('challenge issued -> challenged', ch.claim.state === 'challenged' && ch.challenge.slots[0] !== ch.challenge.slots[1], ch);
+  const poses = ch.challenge.slots;
+  fake.detect = () => [faceDetail(0.15, POSE_ANGLES[poses[0]!]!), faceDetail(0.6, POSE_ANGLES[poses[1]!]!)];
   const out = await cp.submitJointCapture(c1, image);
   check('two faces, right poses, both match owner -> pass', out.result === 'pass', out.result === 'fail' ? out.reasons : '');
   if (out.result === 'pass') {
@@ -146,18 +150,18 @@ try {
   await bothLive(c3);
   ch = await cp.issueChallenge(c3);
   const p3 = ch.challenge;
-  const liveSide = p3.claimantSide === 'left' ? 'right' : 'left';
+  const liveSlot = p3.claimantSlot === 0 ? 1 : 0; // the real person; the other slot is a photo
   fake.detect = () => [
-    faceDetail(0.15, liveSide === 'left' ? POSE_ANGLES[p3.left]! : {}),
-    faceDetail(0.6, liveSide === 'right' ? POSE_ANGLES[p3.right]! : {}),
+    faceDetail(0.15, liveSlot === 0 ? POSE_ANGLES[p3.slots[0]!]! : {}),
+    faceDetail(0.6, liveSlot === 1 ? POSE_ANGLES[p3.slots[1]!]! : {}),
   ];
   let o = await cp.submitJointCapture(c3, image);
   check('you + a printed photo of you -> fail on pose', o.result === 'fail' && o.reasons.some((x) => x.includes('did not')), o.result === 'fail' ? o.reasons : o);
 
   // ---- second face is somebody with their own identity
   ch = await cp.issueChallenge(c3);
-  const p3b = ch.challenge;
-  fake.detect = () => [faceDetail(0.15, POSE_ANGLES[p3b.left]!), faceDetail(0.6, POSE_ANGLES[p3b.right]!)];
+  const p3b = ch.challenge.slots;
+  fake.detect = () => [faceDetail(0.15, POSE_ANGLES[p3b[0]!]!), faceDetail(0.6, POSE_ANGLES[p3b[1]!]!)];
   let n = 0;
   fake.searchFaceIds = () => (++n === 1 ? ['face-E'] : ['face-A']); // second crop matches Alice
   o = await cp.submitJointCapture(c3, image);
@@ -175,7 +179,7 @@ try {
 
   // ---- parallel submits: only one capture per challenge
   const ch4 = await cp.issueChallenge(c4);
-  fake.detect = () => [faceDetail(0.15, POSE_ANGLES[ch4.challenge.left]!), faceDetail(0.6, POSE_ANGLES[ch4.challenge.right]!)];
+  fake.detect = () => [faceDetail(0.15, POSE_ANGLES[ch4.challenge.slots[0]!]!), faceDetail(0.6, POSE_ANGLES[ch4.challenge.slots[1]!]!)];
   const both = await Promise.allSettled([cp.submitJointCapture(c4, image), cp.submitJointCapture(c4, image)]);
   const ok = both.filter((b) => b.status === 'fulfilled').length;
   check('two parallel captures on one challenge: exactly one runs', ok === 1, both.map((b) => b.status));
@@ -189,8 +193,34 @@ try {
   check('liveness older than 10 min -> liveness_stale', await expectError(cp.issueChallenge(c5), 'liveness_stale'));
   check('...and claim goes back to owner_confirmed', (await getClaim(c5)).state === 'owner_confirmed');
 
-  // ---- claims against a group member are refused (step 6)
-  check('new claim against a group member -> group_claim_unsupported', await expectError(openClaim([A], 'Zed'), 'group_claim_unsupported'));
+  // ---- third lookalike: claim against the Alice+Bella group, all 3 in one frame
+  const groupClaim = (await openClaim([A], 'Zed')).claim;
+  check('claim against a group member targets the whole group', !!groupClaim.targetGroupId);
+  await move(groupClaim.id, ['open'], 'owner_confirmed', { auditType: 'test.confirm' });
+  fake.searchFaceIds = () => ['face-A'];
+  let st = await cp.livenessStatus(groupClaim.id);
+  check('group of 2: needs 2 owner liveness checks + claimant', st.ownersRequired === 2 && !st.complete, st);
+  for (const role of ['owner', 'owner', 'claimant'] as const) {
+    const s = await cp.startClaimLiveness(groupClaim.id, role);
+    await cp.finishClaimLiveness(groupClaim.id, role, s);
+  }
+  st = await cp.livenessStatus(groupClaim.id);
+  check('...after 2 owners + claimant -> complete, both_live', st.complete && (await getClaim(groupClaim.id)).state === 'both_live', st);
+  check('a 3rd owner check is refused', await expectError(cp.startClaimLiveness(groupClaim.id, 'owner').then((s) => cp.finishClaimLiveness(groupClaim.id, 'owner', s)), 'owners_done'));
+  const ch3 = await cp.issueChallenge(groupClaim.id);
+  check('challenge has 3 slots with 3 different poses', ch3.challenge.slots.length === 3 && new Set(ch3.challenge.slots).size === 3, ch3.challenge);
+  fake.detect = () => [faceDetail(0.15, POSE_ANGLES[ch3.challenge.slots[0]!]!)  , faceDetail(0.6, POSE_ANGLES[ch3.challenge.slots[1]!]!)];
+  let o3 = await cp.submitJointCapture(groupClaim.id, image);
+  check('only 2 of 3 people in frame -> fail', o3.result === 'fail' && o3.reasons[0]!.includes('Exactly 3'), o3.result === 'fail' ? o3.reasons : o3);
+  const ch3b = await cp.issueChallenge(groupClaim.id);
+  fake.detect = () => ch3b.challenge.slots.map((p, i) => ({ ...faceDetail(0.05 + i * 0.32, POSE_ANGLES[p]!), BoundingBox: { Left: 0.05 + i * 0.32, Top: 0.3, Width: 0.18, Height: 0.24 } }));
+  let n3 = 0;
+  fake.searchFaceIds = () => (++n3 % 2 ? ['face-A'] : ['new-face-1']); // owners match Alice or Bella's face
+  o3 = await cp.submitJointCapture(groupClaim.id, image);
+  check('all 3 in frame, own poses, all match members -> pass', o3.result === 'pass', o3.result === 'fail' ? o3.reasons : '');
+  const size = (await pool.query('select count(*)::int n from group_members where group_id = $1', [groupClaim.targetGroupId])).rows[0].n;
+  check('third person joined the existing group (size 3)', size === 3, size);
+  check('a 4th lookalike is refused: group_full', await expectError(openClaim([A], 'Fourth'), 'group_full'));
 } finally {
   await pool.end();
   console.log(`\n${pass} passed, ${fail} failed`);

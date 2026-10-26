@@ -10,7 +10,7 @@ import { randomInt } from 'node:crypto';
  */
 export const POSES = ['turn', 'tilt', 'nod'] as const;
 export type Pose = (typeof POSES)[number];
-export type Side = 'left' | 'right';
+export type Role = 'owner' | 'claimant';
 
 export const POSE_TEXT: Record<Pose, string> = {
   turn: 'turn your head to the side (left or right)',
@@ -18,24 +18,35 @@ export const POSE_TEXT: Record<Pose, string> = {
   nod: 'look up or down',
 };
 
+/** Max people in one joint frame: every person must get a DIFFERENT pose. */
+export const MAX_PEOPLE = POSES.length;
+
+/**
+ * slots = people from left to right (screen side, camera NOT mirrored);
+ * each slot has its own pose; one slot is where the claimant must stand.
+ */
 export type Challenge = {
-  claimantSide: Side; // where the claimant must stand (screen side, camera NOT mirrored)
-  left: Pose;
-  right: Pose;
+  slots: Pose[];
+  claimantSlot: number;
   issuedAt: string;
 };
 
-/** Random sides and two DIFFERENT poses, so neither person can copy the other. */
-export function newChallenge(): Challenge {
-  const first = POSES[randomInt(POSES.length)]!;
-  const rest = POSES.filter((p) => p !== first);
-  const second = rest[randomInt(rest.length)]!;
-  return {
-    claimantSide: randomInt(2) === 0 ? 'left' : 'right',
-    left: first,
-    right: second,
-    issuedAt: new Date().toISOString(),
-  };
+/** Human names for positions, e.g. ["left", "right"] or ["left", "middle", "right"]. */
+export function positionNames(n: number): string[] {
+  if (n === 2) return ['left', 'right'];
+  if (n === 3) return ['left', 'middle', 'right'];
+  return Array.from({ length: n }, (_, i) => `#${i + 1} from left`);
+}
+
+/** Random distinct poses (a shuffled subset) and a random claimant position. */
+export function newChallenge(people = 2): Challenge {
+  if (people < 2 || people > MAX_PEOPLE) throw new Error(`co-presence supports 2..${MAX_PEOPLE} people`);
+  const pool = [...POSES];
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+  }
+  return { slots: pool.slice(0, people), claimantSlot: randomInt(people), issuedAt: new Date().toISOString() };
 }
 
 export type PoseAngles = { yaw: number; roll: number; pitch: number };
@@ -63,8 +74,9 @@ export type DetectedFace = {
 };
 
 export type FaceCheck = {
-  side: Side;
-  role: 'owner' | 'claimant';
+  slot: number;
+  position: string;
+  role: Role;
   expectedPose: Pose;
   pose: PoseAngles;
   poseOk: boolean;
@@ -72,7 +84,7 @@ export type FaceCheck = {
 };
 
 export type FrameVerdict =
-  | { ok: true; faces: [FaceCheck, FaceCheck] }
+  | { ok: true; faces: FaceCheck[] }
   | { ok: false; reasons: string[]; faces: FaceCheck[] };
 
 export const RULES = {
@@ -83,41 +95,44 @@ export const RULES = {
 
 /**
  * Geometry + pose rules on DetectFaces output. Identity (does each face
- * match the owner, and only the owner) is checked afterwards with the
- * crops returned here, because that needs Rekognition search calls.
+ * match a member, and only members) is checked afterwards with the crops,
+ * because that needs Rekognition search calls.
  */
 export function checkFrame(detected: DetectedFace[], challenge: Challenge): FrameVerdict {
+  const people = challenge.slots.length;
   const faces = detected.filter((f) => f.confidence >= RULES.minDetectionConfidence);
-  if (faces.length !== 2) {
+  if (faces.length !== people) {
     return {
       ok: false,
-      reasons: [`Exactly 2 faces are required in the frame; found ${faces.length}.`],
+      reasons: [`Exactly ${people} faces are required in the frame; found ${faces.length}.`],
       faces: [],
     };
   }
 
-  const [l, r] = [...faces].sort((a, b) => a.box.left - b.box.left) as [DetectedFace, DetectedFace];
-  const make = (f: DetectedFace, side: Side): FaceCheck => {
-    const expectedPose = side === 'left' ? challenge.left : challenge.right;
+  const names = positionNames(people);
+  const sorted = [...faces].sort((a, b) => a.box.left - b.box.left);
+  const checks: FaceCheck[] = sorted.map((f, slot) => {
+    const expectedPose = challenge.slots[slot]!;
     return {
-      side,
-      role: challenge.claimantSide === side ? 'claimant' : 'owner',
+      slot,
+      position: names[slot]!,
+      role: slot === challenge.claimantSlot ? 'claimant' : 'owner',
       expectedPose,
       pose: f.pose,
       poseOk: poseMatches(expectedPose, f.pose),
       box: f.box,
     };
-  };
-  const checks: [FaceCheck, FaceCheck] = [make(l, 'left'), make(r, 'right')];
+  });
 
   const reasons: string[] = [];
   for (const c of checks) {
-    if (c.box.width < RULES.minFaceWidth) reasons.push(`The ${c.side} face is too small; step closer.`);
-    if (!c.poseOk) reasons.push(`The ${c.side} person did not ${POSE_TEXT[c.expectedPose]}.`);
+    if (c.box.width < RULES.minFaceWidth) reasons.push(`The ${c.position} face is too small; step closer.`);
+    if (!c.poseOk) reasons.push(`The ${c.position} person did not ${POSE_TEXT[c.expectedPose]}.`);
   }
-  const ratio = Math.max(l.box.width, r.box.width) / Math.min(l.box.width, r.box.width);
+  const widths = sorted.map((f) => f.box.width);
+  const ratio = Math.max(...widths) / Math.min(...widths);
   if (ratio > RULES.maxSizeRatio) {
-    reasons.push(`The two faces differ too much in size (${ratio.toFixed(1)}x); stand side by side.`);
+    reasons.push(`The faces differ too much in size (${ratio.toFixed(1)}x); stand side by side.`);
   }
 
   return reasons.length ? { ok: false, reasons, faces: checks } : { ok: true, faces: checks };

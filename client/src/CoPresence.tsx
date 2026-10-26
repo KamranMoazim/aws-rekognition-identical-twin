@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, errorBody, type ChallengeView, type ClaimView, type JointResult, type Role } from './api';
+import { api, errorBody, type ChallengeView, type ClaimView, type JointResult, type LivenessStatus, type Role } from './api';
 import { Liveness } from './Liveness';
 
 type Props = {
@@ -12,12 +12,12 @@ type Props = {
 const ROLE_LABEL: Record<Role, string> = { owner: 'Account owner', claimant: 'You (claimant)' };
 
 /**
- * Both people, on this one device:
- *   1. each passes Face Liveness (one face per session, as AWS requires)
- *   2. both stand together and follow a random instruction each; one photo is taken
+ * Everyone, on this one device:
+ *   1. each owner, then the claimant, passes Face Liveness (one face per session, as AWS requires)
+ *   2. all stand together and follow a random instruction each; one photo is taken
  */
 export function CoPresence({ claim, claimToken, region, onPass }: Props) {
-  const [liveness, setLiveness] = useState<Record<Role, boolean>>({ owner: false, claimant: false });
+  const [liveness, setLiveness] = useState<LivenessStatus>({ owners: 0, ownersRequired: 1, claimant: false, complete: false });
   const [running, setRunning] = useState<Role | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -59,17 +59,28 @@ export function CoPresence({ claim, claimToken, region, onPass }: Props) {
   }
 
   const bothLive = claim.state === 'both_live' || claim.state === 'challenged';
+  const rows: { key: string; role: Role; label: string; done: boolean; next: boolean }[] = [
+    ...Array.from({ length: liveness.ownersRequired }, (_, i) => ({
+      key: `owner-${i}`,
+      role: 'owner' as Role,
+      label: liveness.ownersRequired > 1 ? `Account owner ${i + 1} of ${liveness.ownersRequired}` : ROLE_LABEL.owner,
+      done: i < liveness.owners,
+      next: i === liveness.owners,
+    })),
+    { key: 'claimant', role: 'claimant', label: ROLE_LABEL.claimant, done: liveness.claimant, next: !liveness.claimant },
+  ];
+  const people = liveness.ownersRequired + 1;
   return (
     <div className="copresence">
       <h3>1. Liveness, one person at a time</h3>
-      {(['owner', 'claimant'] as Role[]).map((role) => (
-        <div key={role} className="row step">
-          <span className={liveness[role] ? 'done' : ''}>
-            {liveness[role] ? 'Passed: ' : ''}
-            {ROLE_LABEL[role]}
+      {rows.map((r) => (
+        <div key={r.key} className="row step">
+          <span className={r.done ? 'done' : ''}>
+            {r.done ? 'Passed: ' : ''}
+            {r.label}
           </span>
-          {!liveness[role] && (
-            <button className="secondary" onClick={() => setRunning(role)}>
+          {r.next && (
+            <button className="secondary" onClick={() => setRunning(r.role)}>
               Start check
             </button>
           )}
@@ -77,11 +88,11 @@ export function CoPresence({ claim, claimToken, region, onPass }: Props) {
       ))}
       {message && <p className="muted">{message}</p>}
 
-      <h3>2. Joint check, both together</h3>
+      <h3>2. Joint check, all {people} together</h3>
       {bothLive ? (
-        <JointCheck claim={claim} claimToken={claimToken} onPass={onPass} />
+        <JointCheck claim={claim} claimToken={claimToken} onPass={onPass} people={people} />
       ) : (
-        <p className="muted">Unlocks when both liveness checks pass (they stay valid for 10 minutes).</p>
+        <p className="muted">Unlocks when every liveness check passes (they stay valid for 10 minutes).</p>
       )}
     </div>
   );
@@ -89,7 +100,7 @@ export function CoPresence({ claim, claimToken, region, onPass }: Props) {
 
 const COUNTDOWN = 8;
 
-function JointCheck({ claim, claimToken, onPass }: Omit<Props, 'region'>) {
+function JointCheck({ claim, claimToken, onPass, people }: Omit<Props, 'region'> & { people: number }) {
   const video = useRef<HTMLVideoElement>(null);
   const [camError, setCamError] = useState<string | null>(null);
   const [challenge, setChallenge] = useState<ChallengeView | null>(null);
@@ -153,8 +164,6 @@ function JointCheck({ claim, claimToken, onPass }: Omit<Props, 'region'>) {
     }
   }
 
-  const sideOf = (role: 'owner' | 'claimant') =>
-    !challenge ? '' : (challenge.claimantSide === 'left') === (role === 'claimant') ? 'LEFT' : 'RIGHT';
 
   return (
     <div>
@@ -162,29 +171,32 @@ function JointCheck({ claim, claimToken, onPass }: Omit<Props, 'region'>) {
       <div className="stage">
         <video ref={video} autoPlay playsInline muted />
         {challenge && (
-          <div className="overlay">
-            <div className="half">
-              <strong>LEFT person</strong>
-              <span>{challenge.instructions.left}</span>
+          <>
+            <div className="overlay" style={{ gridTemplateColumns: `repeat(${challenge.slots.length}, 1fr)` }}>
+              {challenge.slots.map((s) => (
+                <div key={s.position} className="half">
+                  <strong>
+                    {s.position.toUpperCase()} {s.role === 'claimant' ? '(you)' : '(owner)'}
+                  </strong>
+                  <span>{s.instruction}</span>
+                </div>
+              ))}
             </div>
-            <div className="count">{count > 0 ? count : '...'}</div>
-            <div className="half">
-              <strong>RIGHT person</strong>
-              <span>{challenge.instructions.right}</span>
-            </div>
-          </div>
+            <div className="count-center">{count > 0 ? count : '...'}</div>
+          </>
         )}
       </div>
       {challenge ? (
         <p>
-          <strong>Owner on the {sideOf('owner')}, you on the {sideOf('claimant')}</strong> (as seen on screen). Hold
-          your pose when the count reaches 1.
+          <strong>You stand {challenge.slots[challenge.claimantSlot]!.position.toUpperCase()}</strong>, the owner
+          {people > 2 ? 's take the other places' : ' takes the other place'} (as seen on screen). Hold your pose when
+          the count reaches 1.
         </p>
       ) : (
         <>
           <p className="muted">
-            Both stand side by side, faces about the same size on screen. You will get a random side and a different
-            head movement each, then {COUNTDOWN} seconds.
+            All {people} stand side by side, faces about the same size on screen. You will get a random place and a
+            different head movement each, then {COUNTDOWN} seconds.
           </p>
           <button onClick={start} disabled={busy || !!camError}>
             {busy ? 'Checking...' : result ? 'Try again' : 'Start joint check'}
@@ -216,7 +228,7 @@ export function FaceTable({ faces }: { faces: JointResult['faces'] }) {
     <table>
       <thead>
         <tr>
-          <th>Side</th>
+          <th>Place</th>
           <th>Role</th>
           <th>Asked</th>
           <th>Yaw / Roll / Pitch</th>
@@ -227,8 +239,8 @@ export function FaceTable({ faces }: { faces: JointResult['faces'] }) {
       </thead>
       <tbody>
         {faces.map((f) => (
-          <tr key={f.side}>
-            <td>{f.side}</td>
+          <tr key={f.position}>
+            <td>{f.position}</td>
             <td>{f.role}</td>
             <td>{f.expectedPose}</td>
             <td>

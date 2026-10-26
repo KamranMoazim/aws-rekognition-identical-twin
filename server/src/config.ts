@@ -39,5 +39,7 @@ export const config = {
   livenessMinConfidence: Number(process.env.LIVENESS_MIN_CONFIDENCE ?? 90),
   // Signs session and match tokens. Random per process if unset (tokens die on restart).
   tokenSecret: process.env.TOKEN_SECRET || randomBytes(32).toString('hex'),
+  // Shared secret for the review queue (X-Admin-Token). Unset = admin endpoints disabled.
+  adminToken: process.env.ADMIN_TOKEN ?? '',
   migrationsDir: path.join(serverRoot, 'migrations'),
 };

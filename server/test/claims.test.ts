@@ -50,14 +50,14 @@ try {
 
   // open
   let r = await call('POST', '/claims', { matchToken: match([A]), claimantName: 'Bella' });
-  check('open claim -> 201 open', r.status === 201 && r.body.claim.state === 'open', r);
+  check('open claim -> 201 open, with resume code', r.status === 201 && r.body.claim.state === 'open' && /^\w{4}-\w{4}-\w{4}$/.test(r.body.resumeCode), r);
   const claimId = r.body.claim.id; const ct = { 'x-claim-token': r.body.claimToken };
 
   r = await call('POST', '/claims', { matchToken: match([A]), claimantName: 'Again' });
   check('second open claim on same identity -> 409 with expiresAt', r.status === 409 && r.body.error === 'claim_already_open' && !!r.body.expiresAt, r);
 
   r = await call('POST', '/claims', { matchToken: match([A, X]), claimantName: 'C' });
-  check('claim against group/multi -> 409 unsupported', r.status === 409 && r.body.error === 'group_claim_unsupported', r);
+  check('face matching two unrelated identities -> 409 ambiguous', r.status === 409 && r.body.error === 'ambiguous_match', r);
 
   r = await call('POST', '/claims', { matchToken: issueToken('session', { sub: A }, 60), claimantName: 'C' });
   check('session token used as match token -> 401', r.status === 401, r);
@@ -100,6 +100,9 @@ try {
   const c2 = r.body.claim.id;
   r = await call('POST', `/claims/${c2}/owner-decline`, {}, session(A));
   check('owner declines -> review', r.status === 200 && r.body.claim.state === 'review' && r.body.claim.reviewReason === 'owner_declined', r);
+
+  // Earlier claims above would trip the repeat-claim limit (tested in hardening.test.ts): age them out.
+  await db.query(`update claims set created_at = now() - interval '31 days' where target_identity_id = $1`, [A]);
 
   // lockout: 5 wrong codes
   r = await call('POST', '/claims', { matchToken: match([A]), claimantName: 'Bella' });

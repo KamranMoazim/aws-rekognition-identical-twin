@@ -14,7 +14,7 @@ const face = (left: number, width: number, pose: Partial<DetectedFace['pose']> =
   box: { left, top: 0.3, width, height: width * 1.3 },
   pose: { yaw: 0, roll: 0, pitch: 0, ...pose },
 });
-const ch: Challenge = { claimantSide: 'right', left: 'turn', right: 'tilt', issuedAt: new Date().toISOString() };
+const ch: Challenge = { slots: ['turn', 'tilt'], claimantSlot: 1, issuedAt: new Date().toISOString() };
 
 // poses
 check('turn: yaw 30 ok', poseMatches('turn', { yaw: 30, roll: 2, pitch: 0 }));
@@ -26,20 +26,32 @@ check('nod: pitch -20 ok', poseMatches('nod', { yaw: 4, roll: 3, pitch: -20 }));
 check('nod: straight fails', !poseMatches('nod', { yaw: 0, roll: 0, pitch: 5 }));
 
 // challenge
-const many = Array.from({ length: 200 }, newChallenge);
-check('challenge poses always differ', many.every((c) => c.left !== c.right));
-check('claimant side is random', new Set(many.map((c) => c.claimantSide)).size === 2);
+const many = Array.from({ length: 200 }, () => newChallenge(2));
+check('challenge poses always differ', many.every((c) => c.slots[0] !== c.slots[1]));
+check('claimant side is random', new Set(many.map((c) => c.claimantSlot)).size === 2);
+const three = Array.from({ length: 200 }, () => newChallenge(3));
+check('3 people: all three poses, all different', three.every((c) => new Set(c.slots).size === 3));
+check('3 people: claimant can be in any slot', new Set(three.map((c) => c.claimantSlot)).size === 3);
+let threw = false;
+try { newChallenge(4); } catch { threw = true; }
+check('4 people refused (not enough distinct poses)', threw);
 
 // frames
 let v = checkFrame([face(0.15, 0.2, { yaw: 30 }), face(0.6, 0.2, { roll: 22 })], ch);
 check('two people, both follow their pose -> ok', v.ok, v);
-check('roles follow claimantSide', v.ok && v.faces[1].role === 'claimant' && v.faces[0].role === 'owner', v);
+check('roles follow claimantSlot', v.ok && v.faces[1]!.role === 'claimant' && v.faces[0]!.role === 'owner', v);
 
 v = checkFrame([face(0.6, 0.2, { roll: 22 }), face(0.15, 0.2, { yaw: 30 })], ch);
 check('order of DetectFaces output does not matter (sorted by position)', v.ok, v);
 
 v = checkFrame([face(0.4, 0.25, { yaw: 30 })], ch);
 check('one person alone -> fail (1 face)', !v.ok && v.reasons[0]!.includes('found 1'), v);
+
+const ch3: Challenge = { slots: ['nod', 'turn', 'tilt'], claimantSlot: 0, issuedAt: new Date().toISOString() };
+v = checkFrame([face(0.7, 0.18, { roll: 22 }), face(0.05, 0.18, { pitch: 20 }), face(0.38, 0.18, { yaw: 30 })], ch3);
+check('three people, each own pose -> ok, claimant on the left', v.ok && v.faces[0]!.role === 'claimant' && v.faces[1]!.position === 'middle', v);
+v = checkFrame([face(0.05, 0.18, { pitch: 20 }), face(0.38, 0.18, { yaw: 30 })], ch3);
+check('three-person challenge with two faces -> fail', !v.ok && v.reasons[0]!.includes('Exactly 3'), v);
 
 v = checkFrame([face(0.1, 0.2, { yaw: 30 }), face(0.4, 0.2, { roll: 22 }), face(0.7, 0.2)], ch);
 check('three faces -> fail', !v.ok && v.reasons[0]!.includes('found 3'), v);

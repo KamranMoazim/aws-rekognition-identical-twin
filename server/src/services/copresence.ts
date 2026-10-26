@@ -6,27 +6,47 @@ import { pool } from '../db.js';
 import { audit } from '../lib/audit.js';
 import { HttpError } from '../lib/http.js';
 import { hashSecret, newRecoveryCode } from '../lib/secrets.js';
-import { getClaim, move, transition, type Claim } from './claims.js';
-import { checkFrame, cropRect, newChallenge, type Challenge, type DetectedFace, type FaceCheck } from './copresence-rules.js';
+import { claimMembers, getClaim, move, transition, type Claim } from './claims.js';
+import {
+  checkFrame,
+  cropRect,
+  newChallenge,
+  type Challenge,
+  type DetectedFace,
+  type FaceCheck,
+  type Role,
+} from './copresence-rules.js';
 import { deleteFaces, indexFace, searchByImage, type IdentityMatch } from './faces.js';
 import { getIdentity, type Identity } from './identities.js';
 import { consumeLiveness, createLivenessSession } from './liveness.js';
 
-export type Role = 'owner' | 'claimant';
+export type { Role };
+
+export type LivenessStatus = { owners: number; ownersRequired: number; claimant: boolean; complete: boolean };
 
 const LIVE_WINDOW_MINUTES = 10; // both liveness checks must be this fresh when the challenge starts
 const CHALLENGE_SECONDS = 60;
 const MAX_ATTEMPTS = 3;
 
-/** Which roles have a passed liveness session for this claim, within the window. */
-export async function livenessStatus(claimId: string): Promise<Record<Role, boolean>> {
-  const r = await pool.query<{ role: Role }>(
-    `select distinct role from liveness_sessions
-      where claim_id = $1 and passed and created_at > now() - make_interval(mins => $2)`,
+/**
+ * Passed liveness sessions for this claim within the window: one per member
+ * (owners) plus one for the claimant. Members look alike, so liveness cannot
+ * tell WHICH owner passed, only how many live owner checks happened; the
+ * joint frame is what proves they are different people.
+ */
+export async function livenessStatus(claimId: string): Promise<LivenessStatus> {
+  const claim = await getClaim(claimId);
+  const ownersRequired = (await claimMembers(claim)).length;
+  const r = await pool.query<{ role: Role; n: number }>(
+    `select role, count(*)::int as n from liveness_sessions
+      where claim_id = $1 and passed and created_at > now() - make_interval(mins => $2)
+      group by role`,
     [claimId, LIVE_WINDOW_MINUTES],
   );
-  const roles = new Set(r.rows.map((x) => x.role));
-  return { owner: roles.has('owner'), claimant: roles.has('claimant') };
+  const count = (role: Role) => r.rows.find((x) => x.role === role)?.n ?? 0;
+  const owners = Math.min(count('owner'), ownersRequired);
+  const claimant = count('claimant') > 0;
+  return { owners, ownersRequired, claimant, complete: owners >= ownersRequired && claimant };
 }
 
 export async function startClaimLiveness(claimId: string, role: Role): Promise<string> {
@@ -47,10 +67,18 @@ export async function finishClaimLiveness(claimId: string, role: Role, sessionId
   if (!['owner_confirmed', 'both_live'].includes(claim.state)) {
     throw new HttpError(409, 'bad_claim_state', `Liveness is not expected in state ${claim.state}`);
   }
+  const status0 = await livenessStatus(claimId);
+  if (role === 'owner' && status0.owners >= status0.ownersRequired) {
+    throw new HttpError(409, 'owners_done', 'All owner liveness checks are already done.');
+  }
+  if (role === 'claimant' && status0.claimant) {
+    throw new HttpError(409, 'claimant_done', 'The claimant liveness check is already done.');
+  }
   const { bytes, confidence } = await consumeLiveness(sessionId, 'claim', { claimId, role });
+  const members = await claimMembers(claim);
   const matches = await searchByImage(bytes);
-  const matchesTarget = matches.some((m) => m.identityId === claim.targetIdentityId);
-  const others = matches.filter((m) => m.identityId !== claim.targetIdentityId);
+  const matchesTarget = matches.some((m) => members.includes(m.identityId));
+  const others = matches.filter((m) => !members.includes(m.identityId));
   if (!matchesTarget || others.length) {
     await audit('claim.liveness_rejected', { claimId, data: { role, matches } });
     throw new HttpError(
@@ -66,7 +94,7 @@ export async function finishClaimLiveness(claimId: string, role: Role, sessionId
 
   const status = await livenessStatus(claimId);
   let current: Claim = claim;
-  if (status.owner && status.claimant && claim.state === 'owner_confirmed') {
+  if (status.complete && claim.state === 'owner_confirmed') {
     current = (await transition(claimId, ['owner_confirmed'], 'both_live', { auditType: 'claim.both_live' })).claim;
   }
   return { claim: current, liveness: status };
@@ -79,12 +107,12 @@ export async function issueChallenge(claimId: string): Promise<{ claim: Claim; c
     throw new HttpError(409, 'bad_claim_state', `Cannot start the joint check in state ${claim.state}`);
   }
   const status = await livenessStatus(claimId);
-  if (!status.owner || !status.claimant) {
+  if (!status.complete) {
     // Too long since the liveness checks: do them again.
     await transition(claimId, ['both_live', 'challenged'], 'owner_confirmed', { auditType: 'claim.liveness_stale' });
     throw new HttpError(409, 'liveness_stale', `Liveness checks are older than ${LIVE_WINDOW_MINUTES} minutes. Both people must redo them.`);
   }
-  const challenge = newChallenge();
+  const challenge = newChallenge(status.ownersRequired + 1);
   const updated = await move(claimId, ['both_live', 'challenged'], 'challenged', {
     auditType: 'claim.challenge_issued',
     auditData: challenge,
@@ -111,7 +139,7 @@ export type JointResult =
  */
 export async function submitJointCapture(claimId: string, image: Buffer): Promise<JointResult> {
   // 1. Spend the challenge atomically: one capture per challenge, and only before it expires.
-  const spent = await pool.query<{ challenge: Challenge; target_identity_id: string }>(
+  const spent = await pool.query<{ challenge: Challenge }>(
     `with old as (
        select id, challenge from claims
         where id = $1 and state = 'challenged' and challenge is not null and challenge_expires_at > now()
@@ -119,7 +147,7 @@ export async function submitJointCapture(claimId: string, image: Buffer): Promis
      )
      update claims c set challenge = null, updated_at = now()
        from old where c.id = old.id
-     returning old.challenge, c.target_identity_id`,
+     returning old.challenge`,
     [claimId],
   );
   if (!spent.rowCount) {
@@ -127,7 +155,8 @@ export async function submitJointCapture(claimId: string, image: Buffer): Promis
     if (claim.state !== 'challenged') throw new HttpError(409, 'bad_claim_state', `Claim is ${claim.state}`);
     throw new HttpError(410, 'challenge_expired', 'No active challenge (expired or already used). Start the joint check again.');
   }
-  const { challenge, target_identity_id: targetId } = spent.rows[0]!;
+  const { challenge } = spent.rows[0]!;
+  const members = await claimMembers(await getClaim(claimId));
 
   // 2. Geometry and pose.
   const detected = await detectFaces(image);
@@ -135,9 +164,9 @@ export async function submitJointCapture(claimId: string, image: Buffer): Promis
   let faces: FaceReport[] = frame.faces.map((f) => ({ ...f, matches: [], identityOk: false }));
   const reasons = frame.ok ? [] : [...frame.reasons];
 
-  // 3. Identity: each face, cropped and searched alone, must match the owner and nobody else.
+  // 3. Identity: each face, cropped and searched alone, must match a member and nobody else.
   let claimantCrop: Buffer | null = null;
-  if (frame.faces.length === 2) {
+  if (frame.faces.length === challenge.slots.length) {
     const meta = await sharp(image).metadata();
     faces = await Promise.all(
       frame.faces.map(async (f) => {
@@ -149,7 +178,7 @@ export async function submitJointCapture(claimId: string, image: Buffer): Promis
         } catch {
           matches = [];
         }
-        const identityOk = matches.length > 0 && matches.every((m) => m.identityId === targetId);
+        const identityOk = matches.length > 0 && matches.every((m) => members.includes(m.identityId));
         return { ...f, matches, identityOk };
       }),
     );
@@ -157,15 +186,15 @@ export async function submitJointCapture(claimId: string, image: Buffer): Promis
       if (!f.identityOk) {
         reasons.push(
           f.matches.length
-            ? `The ${f.side} face matches a different identity.`
-            : `The ${f.side} face does not match the account owner.`,
+            ? `The ${f.position} face matches a different identity.`
+            : `The ${f.position} face does not match the account owner(s).`,
         );
       }
     }
   }
 
   const summary = faces.map((f) => ({
-    side: f.side,
+    position: f.position,
     role: f.role,
     expectedPose: f.expectedPose,
     pose: f.pose,
@@ -231,14 +260,20 @@ async function resolveClaim(claimId: string, claimantCrop: Buffer, faces: FaceRe
         await c.query('insert into identities (id, display_name) values ($1, $2)', [newId, before.claimantName]);
         await c.query(`insert into faces (rekognition_face_id, identity_id, source) values ($1, $2, 'co_presence')`, [faceId, newId]);
         await c.query('insert into credentials (identity_id, recovery_code_hash) values ($1, $2)', [newId, recoveryHash]);
-        // Target is never in a group here (openClaim refuses that), so always a new group.
-        const group = await c.query<{ id: string }>('insert into collision_groups default values returning id');
-        const groupId = group.rows[0]!.id;
-        await c.query('insert into group_members (identity_id, group_id) values ($1, $3), ($2, $3)', [
-          before.targetIdentityId,
-          newId,
-          groupId,
-        ]);
+        let groupId = before.targetGroupId;
+        if (groupId) {
+          // Third lookalike: joins the existing group (proved against every member).
+          await c.query('select id from collision_groups where id = $1 for update', [groupId]);
+          await c.query('insert into group_members (identity_id, group_id) values ($1, $2)', [newId, groupId]);
+        } else {
+          const group = await c.query<{ id: string }>('insert into collision_groups default values returning id');
+          groupId = group.rows[0]!.id;
+          await c.query('insert into group_members (identity_id, group_id) values ($1, $3), ($2, $3)', [
+            before.targetIdentityId,
+            newId,
+            groupId,
+          ]);
+        }
         await c.query('update claims set result_identity_id = $2 where id = $1', [claimId, newId]);
         await audit('identity.created', { identityId: newId, claimId, data: { faceId, groupId, via: 'co_presence' } }, c);
       },

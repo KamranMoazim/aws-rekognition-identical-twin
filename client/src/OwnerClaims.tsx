@@ -52,10 +52,18 @@ export function OwnerClaims({ token }: { token: string }) {
         <div key={c.id} className="claim">
           <p>
             <strong>{c.claimantName}</strong> <span className="badge">{c.state}</span>
+            {c.owners.required > 1 && (
+              <span className="badge">
+                {c.owners.confirmed} of {c.owners.required} owners confirmed
+              </span>
+            )}
             <br />
             <span className="muted">{c.nextStep}</span>
           </p>
-          {c.state === 'open' && (
+          {c.state === 'open' && c.owners.youConfirmed && (
+            <p className="muted">You confirmed. Waiting for the other owner(s) of your group.</p>
+          )}
+          {c.state === 'open' && !c.owners.youConfirmed && (
             <div className="row">
               <input
                 placeholder="Recovery code, e.g. K7QD-9MXA-T3PW"

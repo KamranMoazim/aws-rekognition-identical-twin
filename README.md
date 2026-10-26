@@ -23,7 +23,7 @@ Core idea: faces cannot prove two people exist, but two live faces in the same f
 | 3 | Claims: state machine, expiry, owner confirm | done |
 | 4 | Co-presence check: challenge, joint capture, pass rules | done |
 | 5 | PIN set + PIN login for collision groups | done |
-| 6 | Hardening: third lookalike, repeat-claim limits, cross-device resume, review queue | next |
+| 6 | Hardening: third lookalike, repeat-claim limits, cross-device resume, review queue | done |
 
 ## Run (step 1)
 
@@ -151,6 +151,38 @@ How login works now:
 | POST | /login/recovery | `{pinToken, recoveryCode, newPin}` -> session + new recovery code |
 | GET | /me | adds `hasPin`, `needsPin` |
 | POST | /me/pin | `{pin, currentPin?}` set or change |
+
+## Run (step 6)
+
+```bash
+echo "ADMIN_TOKEN=$(openssl rand -hex 16)" >> server/.env   # enables the review queue
+npm run server:dev                      # applies migration 005
+npm --prefix server test                # 132 checks: rules 24, claims 21, co-presence 31, pins 35, hardening 21
+```
+
+- **Third lookalike.** A face that matches a collision group opens a claim against the whole group. Every member confirms with their own recovery code; then every member passes liveness, then the claimant; then one joint photo with all of them (each a different movement). The claimant joins the existing group. Groups are capped at 3 (twins and triplets): with 3 head movements, everyone still gets a different one.
+- **Repeat limit.** After 3 failed claims (cancelled, expired or review) against the same identity or group in 30 days, a new claim goes straight to manual review.
+- **Resume anywhere.** Opening a claim shows a one-time resume code. "Continue claim" on the home screen (any device or browser) restores it.
+- **Review queue.** http://localhost:5173/#admin with your `ADMIN_TOKEN`. Shows why each claim is there, who it is against, confirmations, joint attempts and the full audit trail. **Reject** closes it; **Reopen** gives one more automatic attempt (still needs co-presence). A reviewer never creates an identity directly.
+
+### API (step 6)
+
+| Method | Path | Does |
+| --- | --- | --- |
+| POST | /claims | now also returns `resumeCode`; may come back already in `review` |
+| POST | /claims/resume | `{resumeCode}` -> new claim token |
+| GET | /claims/:id | `owners: {required, confirmed, youConfirmed}` |
+| GET | /claims/:id/liveness | `{owners, ownersRequired, claimant, complete}` |
+| POST | /claims/:id/challenge | `{claimantSlot, slots: [{position, pose, instruction, role}]}` |
+| GET | /admin/review-queue | `X-Admin-Token`; claims waiting for a decision + audit trail |
+| POST | /admin/claims/:id/decision | `{decision: "reject" or "reopen"}` |
+
+## Known limits (by design, see build plan)
+
+- The joint photo is a webcam still with random poses, not AWS's anti-spoof model. A good video replay or mask could beat it.
+- Liveness sessions are not bound to specific faces in the joint photo (the people look alike, so they cannot be told apart).
+- If an owner cannot or will not take part, nothing can be proven automatically: the claim goes to review and the owner's account is unaffected.
+- A member can stall the group's PIN logins for up to 15 minutes with wrong guesses (throttle, never a lockout).
 
 ## Tear down
 

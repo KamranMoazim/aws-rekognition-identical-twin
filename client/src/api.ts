@@ -17,6 +17,7 @@ export type ClaimView = {
   reviewReason: string | null;
   closedAt: string | null;
   attemptCount: number;
+  owners: { required: number; confirmed: number; youConfirmed?: boolean };
 };
 
 export type Role = 'owner' | 'claimant';
@@ -24,13 +25,14 @@ export type Pose = 'turn' | 'tilt' | 'nod';
 
 export type ChallengeView = {
   expiresAt: string;
-  claimantSide: 'left' | 'right';
-  instructions: { left: string; right: string };
-  poses: { left: Pose; right: Pose };
+  claimantSlot: number;
+  slots: { position: string; pose: Pose; instruction: string; role: Role }[];
 };
 
+export type LivenessStatus = { owners: number; ownersRequired: number; claimant: boolean; complete: boolean };
+
 export type FaceResult = {
-  side: 'left' | 'right';
+  position: string;
   role: Role;
   expectedPose: Pose;
   pose: { yaw: number; roll: number; pitch: number };
@@ -45,6 +47,13 @@ export type JointResult =
   | { result: 'fail'; state: string; reasons: string[]; attemptsLeft: number; faces: FaceResult[] };
 
 export const ACTIVE_CLAIM_STATES: ClaimView['state'][] = ['open', 'owner_confirmed', 'both_live', 'challenged'];
+
+export type ReviewItem = {
+  claim: { id: string; claimantName: string; reviewReason: string | null; attemptCount: number; createdAt: string; targetGroupId: string | null };
+  members: { id: string; displayName: string }[];
+  confirmations: number;
+  events: { type: string; at: string; data: unknown }[];
+};
 
 export type LoggedIn = { status: 'logged_in'; identity: Identity; sessionToken: string };
 export type LoginResult = LoggedIn | { status: 'pin_required'; message: string; pinToken: string };
@@ -87,12 +96,23 @@ export const api = {
   loginPin: (pinToken: string, pin: string) => post<LoggedIn>('/login/pin', { pinToken, pin }),
   loginRecovery: (pinToken: string, recoveryCode: string, newPin: string) =>
     post<LoggedIn & { recoveryCode: string }>('/login/recovery', { pinToken, recoveryCode, newPin }),
+  // Review queue (X-Admin-Token)
+  reviewQueue: (adminToken: string) =>
+    call<{ items: ReviewItem[] }>('/admin/review-queue', {}, null, { 'x-admin-token': adminToken }),
+  decide: (id: string, decision: 'reject' | 'reopen', adminToken: string) =>
+    call<{ claim: { id: string; state: string } }>(
+      `/admin/claims/${id}/decision`,
+      { method: 'POST', body: JSON.stringify({ decision }) },
+      null,
+      { 'x-admin-token': adminToken },
+    ),
   me: (token: string) => call<{ identity: Identity; hasPin: boolean; needsPin: boolean }>('/me', {}, token),
   setPin: (token: string, pin: string, currentPin?: string) => post<{ ok: true }>('/me/pin', { pin, currentPin }, token),
 
   // Claims: the claimant (no account) uses a claim token, the owner uses their session.
   openClaim: (matchToken: string, claimantName: string) =>
-    post<{ claim: ClaimView; claimToken: string }>('/claims', { matchToken, claimantName }),
+    post<{ claim: ClaimView; claimToken: string; resumeCode: string }>('/claims', { matchToken, claimantName }),
+  resumeClaim: (resumeCode: string) => post<{ claim: ClaimView; claimToken: string }>('/claims/resume', { resumeCode }),
   claimAsClaimant: (id: string, claimToken: string) =>
     call<{ claim: ClaimView }>(`/claims/${id}`, {}, null, { 'x-claim-token': claimToken }),
   cancelClaim: (id: string, claimToken: string) =>
@@ -105,13 +125,13 @@ export const api = {
 
   // Co-presence: runs on the claimant's device, every call carries the claim token.
   claimLiveness: (id: string, ct: string) =>
-    call<{ liveness: Record<Role, boolean> }>(`/claims/${id}/liveness`, {}, null, { 'x-claim-token': ct }),
+    call<{ liveness: LivenessStatus }>(`/claims/${id}/liveness`, {}, null, { 'x-claim-token': ct }),
   claimLivenessSession: (id: string, role: Role, ct: string) =>
     call<{ sessionId: string }>(`/claims/${id}/liveness-session`, { method: 'POST', body: JSON.stringify({ role }) }, null, {
       'x-claim-token': ct,
     }),
   claimLivenessDone: (id: string, role: Role, sessionId: string, ct: string) =>
-    call<{ state: string; liveness: Record<Role, boolean> }>(
+    call<{ state: string; liveness: LivenessStatus }>(
       `/claims/${id}/liveness`,
       { method: 'POST', body: JSON.stringify({ role, sessionId }) },
       null,

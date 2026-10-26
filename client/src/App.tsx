@@ -4,6 +4,7 @@ import { ClaimStatus, type StoredClaim } from './ClaimStatus';
 import { Liveness } from './Liveness';
 import { OwnerClaims } from './OwnerClaims';
 import { PinLogin, PinSetup } from './Pin';
+import { Admin } from './Admin';
 import { store } from './storage';
 
 type View =
@@ -16,12 +17,24 @@ type View =
   | { name: 'match'; topSimilarity: number; matchToken: string; displayName: string }
   | { name: 'pin'; pinToken: string }
   | { name: 'new-code'; recoveryCode: string }
+  | { name: 'claim-created'; resumeCode: string; state: string }
   | { name: 'error'; error: ApiError };
 
 const TOKEN_KEY = 'twin.sessionToken';
 const CLAIM_KEY = 'twin.claim';
 
 export function App({ region }: { region: string }) {
+  const [hash, setHash] = useState(() => location.hash);
+  useEffect(() => {
+    const on = () => setHash(location.hash);
+    addEventListener('hashchange', on);
+    return () => removeEventListener('hashchange', on);
+  }, []);
+  if (hash === '#admin') return <Admin />;
+  return <UserApp region={region} />;
+}
+
+function UserApp({ region }: { region: string }) {
   const [view, setView] = useState<View>({ name: 'home' });
   const [token, setToken] = useState<string | null>(() => store.get<string>(TOKEN_KEY));
   // Persistent: closing the window must not orphan a claim (it would block new claims for 24 h).
@@ -30,6 +43,7 @@ export function App({ region }: { region: string }) {
   const [pinState, setPinState] = useState({ hasPin: false, needsPin: false });
   const [showChangePin, setShowChangePin] = useState(false);
   const [name, setName] = useState('');
+  const [resumeInput, setResumeInput] = useState('');
 
   function loadMe() {
     if (!token) return setMe(null);
@@ -82,12 +96,23 @@ export function App({ region }: { region: string }) {
     }
   }
 
+  async function resume(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      const r = await api.resumeClaim(resumeInput);
+      keepClaim({ claimId: r.claim.id, claimToken: r.claimToken });
+      setResumeInput('');
+    } catch (err) {
+      setView({ name: 'error', error: errorBody(err) });
+    }
+  }
+
   async function startClaim(matchToken: string, claimantName: string) {
     setView({ name: 'working', label: 'Opening your claim...' });
     try {
       const r = await api.openClaim(matchToken, claimantName);
       keepClaim({ claimId: r.claim.id, claimToken: r.claimToken });
-      setView({ name: 'home' });
+      setView({ name: 'claim-created', resumeCode: r.resumeCode, state: r.claim.state });
     } catch (err) {
       setView({ name: 'error', error: errorBody(err) });
     }
@@ -97,7 +122,7 @@ export function App({ region }: { region: string }) {
     <main>
       <header>
         <h1>Twin Resolver</h1>
-        <p className="muted">Step 5: PINs for collision groups</p>
+        <p className="muted">Step 6: groups of up to 3, resume codes, review queue</p>
       </header>
 
       {claim && <ClaimStatus stored={claim} region={region} onSignedIn={signIn} onDone={() => keepClaim(null)} />}
@@ -146,6 +171,24 @@ export function App({ region }: { region: string }) {
             <button onClick={() => setView({ name: 'register-form' })}>Register</button>
             <button onClick={() => setView({ name: 'login-liveness' })}>Log in with face</button>
           </div>
+          {!claim && (
+            <form className="row" onSubmit={resume}>
+              <input placeholder="Resume code of a claim, e.g. Q4MZ-8KDT-W2HN" value={resumeInput} onChange={(e) => setResumeInput(e.target.value)} />
+              <button type="submit" className="secondary" disabled={!resumeInput.trim()}>Continue claim</button>
+            </form>
+          )}
+        </section>
+      )}
+
+      {view.name === 'claim-created' && (
+        <section className={`card ${view.state === 'review' ? 'warn' : 'ok'}`}>
+          <h2>{view.state === 'review' ? 'Claim sent to manual review' : 'Claim opened'}</h2>
+          {view.state === 'review' && (
+            <p>There have been too many failed claims against this account recently, so a person will look at this one.</p>
+          )}
+          <p>Resume code (shown once). Use it to continue this claim on another device or browser:</p>
+          <p className="code">{view.resumeCode}</p>
+          <button onClick={() => setView({ name: 'home' })}>I saved it</button>
         </section>
       )}
 

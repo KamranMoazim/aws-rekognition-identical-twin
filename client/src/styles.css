@@ -51,3 +51,6 @@ input.pin { letter-spacing: 8px; font: 600 20px ui-monospace, monospace; max-wid
 .pin-setup { display: grid; gap: 10px; margin-top: 12px; }
 .ok-text { color: #1d7a3e; }
 .small { font-size: 12px; }
+.count-center { position: absolute; inset: 0; display: grid; place-items: center; font: 700 56px system-ui; color: #fff; text-shadow: 0 2px 6px #000; pointer-events: none; }
+.admin-item { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+.events { font: 12px ui-monospace, monospace; max-height: 160px; overflow: auto; background: #f3f4f6; padding: 8px; border-radius: 6px; }

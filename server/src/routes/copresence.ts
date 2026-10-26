@@ -1,7 +1,7 @@
 import { Router, type Request } from 'express';
 import { HttpError, requireString } from '../lib/http.js';
 import { readToken } from '../lib/tokens.js';
-import { POSE_TEXT } from '../services/copresence-rules.js';
+import { POSE_TEXT, positionNames } from '../services/copresence-rules.js';
 import {
   finishClaimLiveness,
   issueChallenge,
@@ -50,14 +50,16 @@ copresenceRouter.post('/claims/:id/liveness', async (req, res) => {
 
 copresenceRouter.post('/claims/:id/challenge', async (req, res) => {
   const { challenge, expiresAt } = await issueChallenge(claimFromToken(req));
+  const names = positionNames(challenge.slots.length);
   res.json({
     expiresAt,
-    claimantSide: challenge.claimantSide,
-    instructions: {
-      left: POSE_TEXT[challenge.left],
-      right: POSE_TEXT[challenge.right],
-    },
-    poses: { left: challenge.left, right: challenge.right },
+    claimantSlot: challenge.claimantSlot,
+    slots: challenge.slots.map((pose, i) => ({
+      position: names[i],
+      pose,
+      instruction: POSE_TEXT[pose],
+      role: i === challenge.claimantSlot ? 'claimant' : 'owner',
+    })),
   });
 });
 
@@ -70,7 +72,7 @@ copresenceRouter.post('/claims/:id/joint-capture', async (req, res) => {
 
   const out = await submitJointCapture(id, image);
   const faces = out.faces.map((f) => ({
-    side: f.side,
+    position: f.position,
     role: f.role,
     expectedPose: f.expectedPose,
     pose: {

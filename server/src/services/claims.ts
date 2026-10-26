@@ -1,7 +1,9 @@
+import { createHash, randomInt } from 'node:crypto';
 import type pg from 'pg';
 import { pool, tx } from '../db.js';
 import { audit } from '../lib/audit.js';
 import { HttpError } from '../lib/http.js';
+import { groupsOf } from './identities.js';
 
 /**
  * Claim state machine (see build plan):
@@ -20,10 +22,16 @@ export const TERMINAL_STATES = ['resolved', 'review', 'expired', 'cancelled'] as
 export type ClaimState = (typeof ACTIVE_STATES)[number] | (typeof TERMINAL_STATES)[number];
 
 const CLAIM_TTL_HOURS = 24;
+/** Twins and triplets: with 3 people every person still gets a different head movement. */
+export const MAX_GROUP_SIZE = 3;
+/** Failed claims (cancelled / expired / review) against one target within the window before new ones go to review. */
+export const REPEAT_LIMIT = 3;
+export const REPEAT_WINDOW_DAYS = 30;
 
 export type Claim = {
   id: string;
   targetIdentityId: string;
+  targetGroupId: string | null;
   claimantName: string;
   state: ClaimState;
   expiresAt: string;
@@ -33,6 +41,7 @@ export type Claim = {
   resultIdentityId: string | null;
   createdAt: string;
   closedAt: string | null;
+  reviewDecision: string | null;
 };
 
 const isActive = (s: ClaimState) => (ACTIVE_STATES as readonly string[]).includes(s);
@@ -42,6 +51,7 @@ function toClaim(r: Record<string, any>): Claim {
   return {
     id: r.id,
     targetIdentityId: r.target_identity_id,
+    targetGroupId: r.target_group_id,
     claimantName: r.claimant_name,
     state: r.state,
     expiresAt: r.expires_at,
@@ -51,6 +61,7 @@ function toClaim(r: Record<string, any>): Claim {
     resultIdentityId: r.result_identity_id,
     createdAt: r.created_at,
     closedAt: r.closed_at,
+    reviewDecision: r.review_decision,
   };
 }
 
@@ -58,11 +69,11 @@ function toClaim(r: Record<string, any>): Claim {
 export function nextStep(state: ClaimState): string {
   switch (state) {
     case 'open':
-      return 'Waiting for the account owner to log in and confirm with their recovery code.';
+      return 'Waiting for the account owner(s) to log in and confirm with their recovery code.';
     case 'owner_confirmed':
-      return 'Owner confirmed. Next: on one device, the owner and then you each pass a liveness check.';
+      return 'Owners confirmed. Next: on one device, each owner and then you pass a liveness check, one at a time.';
     case 'both_live':
-      return 'Both people passed liveness. Next: stand together in front of the camera for the joint check.';
+      return 'Everyone passed liveness. Next: stand together in front of the camera for the joint check.';
     case 'challenged':
       return 'Joint check running: follow the instructions on screen.';
     case 'resolved':
@@ -76,43 +87,118 @@ export function nextStep(state: ClaimState): string {
   }
 }
 
-/** Open a "this is not my account" claim against the identity a face matched. */
-export async function openClaim(matchedIdentityIds: string[], claimantName: string): Promise<Claim> {
-  if (matchedIdentityIds.length !== 1) {
-    // A face matching several identities means a collision group already exists.
-    // A third lookalike must prove themselves against every member: step 6.
-    throw new HttpError(409, 'group_claim_unsupported', 'This face matches a collision group. Claims against groups come in step 6.');
+// Same alphabet as recovery codes: easy to read back.
+const RESUME_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const newResumeCode = () =>
+  Array.from({ length: 3 }, () => Array.from({ length: 4 }, () => RESUME_ALPHABET[randomInt(RESUME_ALPHABET.length)]).join('')).join('-');
+/** Resume codes are random (~59 bits), so a fast hash is fine and lets us look them up directly. */
+export const hashResumeCode = (code: string) =>
+  createHash('sha256').update(code.trim().toUpperCase()).digest('hex');
+
+/** The identities whose account a claim is about: one identity, or every member of its group. */
+export async function claimMembers(claim: Pick<Claim, 'targetIdentityId' | 'targetGroupId'>, db: Pick<pg.PoolClient, 'query'> = pool): Promise<string[]> {
+  if (!claim.targetGroupId) return [claim.targetIdentityId];
+  const r = await db.query<{ identity_id: string }>(
+    'select identity_id from group_members where group_id = $1 order by joined_at',
+    [claim.targetGroupId],
+  );
+  return r.rows.map((x) => x.identity_id);
+}
+
+export type OpenedClaim = { claim: Claim; resumeCode: string };
+
+/**
+ * Open a "this is not my account" claim against whatever the face matched:
+ * one identity, or a whole collision group (a third lookalike must then prove
+ * themselves against EVERY member).
+ */
+export async function openClaim(matchedIdentityIds: string[], claimantName: string): Promise<OpenedClaim> {
+  const groupIds = await groupsOf(matchedIdentityIds);
+  let targetIdentityId: string;
+  let targetGroupId: string | null = null;
+
+  if (groupIds.length > 1) {
+    throw new HttpError(409, 'ambiguous_match', 'This face matches more than one collision group. Claim refused.');
   }
-  const target = matchedIdentityIds[0]!;
-  const inGroup = await pool.query('select 1 from group_members where identity_id = $1', [target]);
-  if (inGroup.rowCount) {
-    throw new HttpError(409, 'group_claim_unsupported', 'This identity is already in a collision group. Claims against groups come in step 6.');
+  if (groupIds.length === 1) {
+    targetGroupId = groupIds[0]!;
+    const members = await claimMembers({ targetIdentityId: '', targetGroupId });
+    if (matchedIdentityIds.some((id) => !members.includes(id))) {
+      throw new HttpError(409, 'ambiguous_match', 'This face matches identities outside one group. Claim refused.');
+    }
+    if (members.length >= MAX_GROUP_SIZE) {
+      throw new HttpError(409, 'group_full', `Collision groups are limited to ${MAX_GROUP_SIZE} people. This needs manual handling.`);
+    }
+    targetIdentityId = members[0]!;
+  } else {
+    if (matchedIdentityIds.length !== 1) {
+      throw new HttpError(409, 'ambiguous_match', 'This face matches more than one identity. Claim refused.');
+    }
+    targetIdentityId = matchedIdentityIds[0]!;
   }
+
+  // Repeat limit: too many failed claims against this target recently -> straight to review.
+  const recent = await pool.query<{ n: number }>(
+    `select count(*)::int as n from claims
+      where (target_identity_id = $1 or (target_group_id is not null and target_group_id = $2))
+        and state in ('cancelled', 'expired', 'review')
+        and created_at > now() - make_interval(days => $3)`,
+    [targetIdentityId, targetGroupId, REPEAT_WINDOW_DAYS],
+  );
+  const tooMany = recent.rows[0]!.n >= REPEAT_LIMIT;
+
+  const resumeCode = newResumeCode();
   try {
     const r = await pool.query(
-      `insert into claims (target_identity_id, claimant_name, state, expires_at)
-       values ($1, $2, 'open', now() + make_interval(hours => $3)) returning *`,
-      [target, claimantName, CLAIM_TTL_HOURS],
+      `insert into claims (target_identity_id, target_group_id, claimant_name, state, expires_at,
+                           resume_code_hash, review_reason, closed_at)
+       values ($1, $2, $3, $4, now() + make_interval(hours => $5), $6, $7, $8) returning *`,
+      [
+        targetIdentityId,
+        targetGroupId,
+        claimantName,
+        tooMany ? 'review' : 'open',
+        CLAIM_TTL_HOURS,
+        hashResumeCode(resumeCode),
+        tooMany ? 'too_many_claims' : null,
+        tooMany ? new Date() : null,
+      ],
     );
     const claim = toClaim(r.rows[0]);
-    await audit('claim.opened', { claimId: claim.id, identityId: target, data: { claimantName } });
-    return claim;
+    await audit(tooMany ? 'claim.opened_into_review' : 'claim.opened', {
+      claimId: claim.id,
+      identityId: targetIdentityId,
+      data: { claimantName, targetGroupId, recentFailedClaims: recent.rows[0]!.n },
+    });
+    return { claim, resumeCode };
   } catch (err) {
     if ((err as { code?: string }).code === '23505') {
       const open = await pool.query<{ expires_at: string }>(
-        'select expires_at from claims where target_identity_id = $1 and state = any($2)',
-        [target, [...ACTIVE_STATES]],
+        `select expires_at from claims
+          where (target_identity_id = $1 or (target_group_id is not null and target_group_id = $2)) and state = any($3)`,
+        [targetIdentityId, targetGroupId, [...ACTIVE_STATES]],
       );
       throw new HttpError(
         409,
         'claim_already_open',
-        'A claim against this identity is already in progress. Resume it in the browser where you opened it, ' +
+        'A claim against this identity is already in progress. Resume it with its resume code, ' +
           'or ask the account owner to cancel it. Otherwise it expires on its own.',
         { expiresAt: open.rows[0]?.expires_at },
       );
     }
     throw err;
   }
+}
+
+/** Find an active claim by its resume code (claimant on another device). */
+export async function claimByResumeCode(code: string): Promise<Claim> {
+  await expireDueClaims();
+  const r = await pool.query('select * from claims where resume_code_hash = $1', [hashResumeCode(code)]);
+  const row = r.rows[0];
+  if (!row) throw new HttpError(404, 'claim_not_found', 'No claim with this resume code.');
+  const claim = toClaim(row);
+  if (!isActive(claim.state)) throw new HttpError(409, 'claim_closed', `This claim is ${claim.state}.`, { state: claim.state });
+  return claim;
 }
 
 export async function getClaim(id: string): Promise<Claim> {
@@ -169,7 +255,7 @@ async function transition(
              updated_at = now(),
              owner_confirmed_at = case when $2 = 'owner_confirmed' then now() else owner_confirmed_at end,
              review_reason = coalesce($3, review_reason),
-             closed_at = case when $4 then now() else closed_at end
+             closed_at = case when $4 then now() else null end
            where id = $1 returning *`,
           [id, target, target === 'review' ? (opts.reviewReason ?? null) : null, isTerminal(target)],
         )
@@ -211,8 +297,45 @@ export async function expireDueClaims(): Promise<number> {
 export async function activeClaimsAgainst(identityId: string): Promise<Claim[]> {
   await expireDueClaims();
   const r = await pool.query(
-    `select * from claims where target_identity_id = $1 and state = any($2) order by created_at desc`,
+    `select * from claims
+      where state = any($2)
+        and (target_identity_id = $1
+             or target_group_id in (select group_id from group_members where identity_id = $1))
+      order by created_at desc`,
     [identityId, [...ACTIVE_STATES]],
   );
   return r.rows.map(toClaim);
+}
+
+export async function isClaimOwner(claim: Claim, identityId: string): Promise<boolean> {
+  return (await claimMembers(claim)).includes(identityId);
+}
+
+/** Which members have confirmed. The claim moves on only when all of them have. */
+export async function confirmations(claim: Claim): Promise<{ confirmed: string[]; required: string[] }> {
+  const required = await claimMembers(claim);
+  const r = await pool.query<{ identity_id: string }>('select identity_id from claim_confirmations where claim_id = $1', [claim.id]);
+  return { confirmed: r.rows.map((x) => x.identity_id).filter((id) => required.includes(id)), required };
+}
+
+/**
+ * One member confirms (recovery code already checked by the caller).
+ * The last confirmation moves the claim to owner_confirmed, atomically.
+ */
+export async function confirmAsMember(claimId: string, identityId: string): Promise<Claim> {
+  const { claim } = await transition(claimId, ['open'], 'open', {
+    auditType: 'claim.member_confirmed',
+    auditData: { identityId },
+    also: async (c) => {
+      await c.query('insert into claim_confirmations (claim_id, identity_id) values ($1, $2) on conflict do nothing', [claimId, identityId]);
+    },
+  });
+  if (claim.state !== 'open') {
+    if (claim.state === 'expired') throw new HttpError(410, 'claim_expired', 'This claim has expired.');
+    throw new HttpError(409, 'bad_claim_state', `Claim is ${claim.state}`);
+  }
+  const { confirmed, required } = await confirmations(claim);
+  if (confirmed.length < required.length) return claim;
+  const moved = await transition(claimId, ['open'], 'owner_confirmed', { auditType: 'claim.owner_confirmed' });
+  return moved.claim; // a parallel last confirmation may have moved it already: either way it is confirmed
 }
