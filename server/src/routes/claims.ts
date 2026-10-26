@@ -21,6 +21,7 @@ function view(claim: Claim) {
     ownerConfirmedAt: claim.ownerConfirmedAt,
     reviewReason: claim.reviewReason,
     closedAt: claim.closedAt,
+    attemptCount: claim.attemptCount,
   };
 }
 

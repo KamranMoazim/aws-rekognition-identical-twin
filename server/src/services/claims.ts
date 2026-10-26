@@ -60,10 +60,11 @@ export function nextStep(state: ClaimState): string {
     case 'open':
       return 'Waiting for the account owner to log in and confirm with their recovery code.';
     case 'owner_confirmed':
-      return 'Owner confirmed. Next: both people pass a liveness check, then a joint camera check (step 4).';
+      return 'Owner confirmed. Next: on one device, the owner and then you each pass a liveness check.';
     case 'both_live':
+      return 'Both people passed liveness. Next: stand together in front of the camera for the joint check.';
     case 'challenged':
-      return 'Joint camera check in progress (step 4).';
+      return 'Joint check running: follow the instructions on screen.';
     case 'resolved':
       return 'Resolved: a separate identity was created.';
     case 'review':
@@ -83,6 +84,10 @@ export async function openClaim(matchedIdentityIds: string[], claimantName: stri
     throw new HttpError(409, 'group_claim_unsupported', 'This face matches a collision group. Claims against groups come in step 6.');
   }
   const target = matchedIdentityIds[0]!;
+  const inGroup = await pool.query('select 1 from group_members where identity_id = $1', [target]);
+  if (inGroup.rowCount) {
+    throw new HttpError(409, 'group_claim_unsupported', 'This identity is already in a collision group. Claims against groups come in step 6.');
+  }
   try {
     const r = await pool.query(
       `insert into claims (target_identity_id, claimant_name, state, expires_at)
@@ -156,7 +161,7 @@ async function transition(
       return { claim: current, moved: false }; // not allowed from here
     }
 
-    const updated = toClaim(
+    let updated = toClaim(
       (
         await c.query(
           `update claims set
@@ -170,11 +175,16 @@ async function transition(
         )
       ).rows[0],
     );
-    if (target === to && opts.also) await opts.also(c, updated);
+    if (target === to && opts.also) {
+      await opts.also(c, updated);
+      updated = toClaim((await c.query('select * from claims where id = $1', [id])).rows[0]); // see the extra writes
+    }
     await audit(auditType, { claimId: id, identityId: current.targetIdentityId, data: opts.auditData }, c);
     return { claim: updated, moved: target === to };
   });
 }
+
+export { transition };
 
 /** transition() that throws when the claim did not land in the wanted state. */
 export async function move(id: string, from: ClaimState[], to: ClaimState, opts: TransitionOpts): Promise<Claim> {

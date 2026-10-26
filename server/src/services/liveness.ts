@@ -33,13 +33,16 @@ export async function createLivenessSession(
 export async function consumeLiveness(
   sessionId: string,
   purpose: LivenessPurpose,
+  claim?: { claimId: string; role: 'owner' | 'claimant' },
 ): Promise<{ bytes: Uint8Array; confidence: number }> {
+  // A claim session only counts for the claim and role it was created for.
   const spent = await pool.query(
     `update liveness_sessions set used = true
       where session_id = $1 and purpose = $2 and used = false
+        and claim_id is not distinct from $3 and role is not distinct from $4
         and created_at > now() - interval '10 minutes'
       returning session_id`,
-    [sessionId, purpose],
+    [sessionId, purpose, claim?.claimId ?? null, claim?.role ?? null],
   );
   if (!spent.rowCount) {
     throw new HttpError(400, 'liveness_invalid', 'Liveness session unknown, expired, already used, or for another purpose');

@@ -1,9 +1,9 @@
 import { FaceLivenessDetector } from '@aws-amplify/ui-react-liveness';
 import { useEffect, useRef, useState } from 'react';
-import { api } from './api';
 
 type Props = {
-  purpose: 'register' | 'login';
+  /** Asks the backend for a liveness session id (register, login or a claim role). */
+  start: () => Promise<string>;
   region: string;
   /** Called with the spent session id once AWS finishes its analysis. */
   onComplete: (sessionId: string) => void;
@@ -15,7 +15,7 @@ type Props = {
  * stream the camera into it. The browser never sees the verdict: the
  * backend reads results itself when we hand it the session id.
  */
-export function Liveness({ purpose, region, onComplete, onCancel }: Props) {
+export function Liveness({ start, region, onComplete, onCancel }: Props) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const started = useRef(false); // StrictMode runs effects twice in dev
@@ -23,11 +23,10 @@ export function Liveness({ purpose, region, onComplete, onCancel }: Props) {
   useEffect(() => {
     if (started.current) return;
     started.current = true;
-    api
-      .livenessSession(purpose)
-      .then((r) => setSessionId(r.sessionId))
+    start()
+      .then(setSessionId)
       .catch((e: Error) => setError(e.message));
-  }, [purpose]);
+  }, [start]);
 
   if (error) {
     return (

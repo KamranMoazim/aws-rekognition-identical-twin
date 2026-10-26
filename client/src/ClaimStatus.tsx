@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { ACTIVE_CLAIM_STATES, api, errorBody, type ClaimView } from './api';
+import { ACTIVE_CLAIM_STATES, api, errorBody, type ClaimView, type JointResult } from './api';
+import { CoPresence, FaceTable } from './CoPresence';
 
 export type StoredClaim = { claimId: string; claimToken: string };
 
@@ -15,9 +16,17 @@ const LABEL: Record<ClaimView['state'], string> = {
 };
 
 /** The claimant's view of their claim. Polls while the claim is active. */
-export function ClaimStatus({ stored, onDone }: { stored: StoredClaim; onDone: () => void }) {
+type Props = {
+  stored: StoredClaim;
+  region: string;
+  onSignedIn: (sessionToken: string) => void;
+  onDone: () => void;
+};
+
+export function ClaimStatus({ stored, region, onSignedIn, onDone }: Props) {
   const [claim, setClaim] = useState<ClaimView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [passed, setPassed] = useState<Extract<JointResult, { result: 'pass' }> | null>(null);
 
   useEffect(() => {
     let stop = false;
@@ -51,6 +60,23 @@ export function ClaimStatus({ stored, onDone }: { stored: StoredClaim; onDone: (
       </section>
     );
   }
+  if (passed) {
+    return (
+      <section className="card ok">
+        <h2>Two people proven. Your identity is created.</h2>
+        <p>
+          Welcome, <strong>{passed.identity.displayName}</strong>. You and the account owner are now a collision group:
+          a face match finds the group, and your PIN (step 5) picks the right person.
+        </p>
+        <p>Save your recovery code. It is shown only once.</p>
+        <p className="code">{passed.recoveryCode}</p>
+        <FaceTable faces={passed.faces} />
+        <div className="row">
+          <button onClick={onDone}>I saved it</button>
+        </div>
+      </section>
+    );
+  }
   if (!claim) return <p className="muted">Loading claim...</p>;
 
   const active = ACTIVE_CLAIM_STATES.includes(claim.state);
@@ -77,6 +103,17 @@ export function ClaimStatus({ stored, onDone }: { stored: StoredClaim; onDone: (
           The person this face matched must log in on this app and confirm with their recovery code. Keep this
           page open; it updates by itself.
         </p>
+      )}
+      {['owner_confirmed', 'both_live', 'challenged'].includes(claim.state) && (
+        <CoPresence
+          claim={claim}
+          claimToken={stored.claimToken}
+          region={region}
+          onPass={(r) => {
+            setPassed(r);
+            onSignedIn(r.sessionToken);
+          }}
+        />
       )}
       <div className="row">
         {active ? (

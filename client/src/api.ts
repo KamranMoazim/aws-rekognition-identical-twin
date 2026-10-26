@@ -16,7 +16,33 @@ export type ClaimView = {
   ownerConfirmedAt: string | null;
   reviewReason: string | null;
   closedAt: string | null;
+  attemptCount: number;
 };
+
+export type Role = 'owner' | 'claimant';
+export type Pose = 'turn' | 'tilt' | 'nod';
+
+export type ChallengeView = {
+  expiresAt: string;
+  claimantSide: 'left' | 'right';
+  instructions: { left: string; right: string };
+  poses: { left: Pose; right: Pose };
+};
+
+export type FaceResult = {
+  side: 'left' | 'right';
+  role: Role;
+  expectedPose: Pose;
+  pose: { yaw: number; roll: number; pitch: number };
+  poseOk: boolean;
+  similarity: number | null;
+  identityOk: boolean;
+  boxWidth: number;
+};
+
+export type JointResult =
+  | { result: 'pass'; state: string; identity: Identity; recoveryCode: string; sessionToken: string; faces: FaceResult[] }
+  | { result: 'fail'; state: string; reasons: string[]; attemptsLeft: number; faces: FaceResult[] };
 
 export const ACTIVE_CLAIM_STATES: ClaimView['state'][] = ['open', 'owner_confirmed', 'both_live', 'challenged'];
 
@@ -70,6 +96,27 @@ export const api = {
     post<{ claim: ClaimView }>(`/claims/${id}/owner-confirm`, { recoveryCode }, token),
   ownerDecline: (id: string, token: string) => post<{ claim: ClaimView }>(`/claims/${id}/owner-decline`, {}, token),
   ownerCancel: (id: string, token: string) => post<{ claim: ClaimView }>(`/claims/${id}/owner-cancel`, {}, token),
+
+  // Co-presence: runs on the claimant's device, every call carries the claim token.
+  claimLiveness: (id: string, ct: string) =>
+    call<{ liveness: Record<Role, boolean> }>(`/claims/${id}/liveness`, {}, null, { 'x-claim-token': ct }),
+  claimLivenessSession: (id: string, role: Role, ct: string) =>
+    call<{ sessionId: string }>(`/claims/${id}/liveness-session`, { method: 'POST', body: JSON.stringify({ role }) }, null, {
+      'x-claim-token': ct,
+    }),
+  claimLivenessDone: (id: string, role: Role, sessionId: string, ct: string) =>
+    call<{ state: string; liveness: Record<Role, boolean> }>(
+      `/claims/${id}/liveness`,
+      { method: 'POST', body: JSON.stringify({ role, sessionId }) },
+      null,
+      { 'x-claim-token': ct },
+    ),
+  challenge: (id: string, ct: string) =>
+    call<ChallengeView>(`/claims/${id}/challenge`, { method: 'POST' }, null, { 'x-claim-token': ct }),
+  jointCapture: (id: string, image: string, ct: string) =>
+    call<JointResult>(`/claims/${id}/joint-capture`, { method: 'POST', body: JSON.stringify({ image }) }, null, {
+      'x-claim-token': ct,
+    }),
 };
 
 /** Pull the server's error body out of a thrown fetch error (keeps every field, e.g. matchToken). */

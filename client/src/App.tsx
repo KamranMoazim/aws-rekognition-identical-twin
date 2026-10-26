@@ -87,10 +87,10 @@ export function App({ region }: { region: string }) {
     <main>
       <header>
         <h1>Twin Resolver</h1>
-        <p className="muted">Step 3: claims ("this is not me"), owner confirm, expiry</p>
+        <p className="muted">Step 4: co-presence check (two live faces, one frame)</p>
       </header>
 
-      {claim && <ClaimStatus stored={claim} onDone={() => keepClaim(null)} />}
+      {claim && <ClaimStatus stored={claim} region={region} onSignedIn={signIn} onDone={() => keepClaim(null)} />}
 
       {me && token && (
         <>
@@ -140,7 +140,7 @@ export function App({ region }: { region: string }) {
 
       {view.name === 'register-liveness' && (
         <Liveness
-          purpose="register"
+          start={() => api.livenessSession('register').then((r) => r.sessionId)}
           region={region}
           onComplete={(id) => finishRegister(id, view.displayName)}
           onCancel={() => setView({ name: 'home' })}
@@ -148,7 +148,12 @@ export function App({ region }: { region: string }) {
       )}
 
       {view.name === 'login-liveness' && (
-        <Liveness purpose="login" region={region} onComplete={finishLogin} onCancel={() => setView({ name: 'home' })} />
+        <Liveness
+          start={() => api.livenessSession('login').then((r) => r.sessionId)}
+          region={region}
+          onComplete={finishLogin}
+          onCancel={() => setView({ name: 'home' })}
+        />
       )}
 
       {view.name === 'working' && <p className="muted">{view.label}</p>}

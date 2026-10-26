@@ -7,13 +7,17 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test:claims": "tsx test/claims.test.ts"
+    "test:claims": "tsx test/claims.test.ts",
+    "test:rules": "tsx test/copresence-rules.test.ts",
+    "test": "npm run test:rules && npm run test:claims && npm run test:copresence",
+    "test:copresence": "tsx test/copresence.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-rekognition": "^3.1127.0",
     "cors": "^2.8.5",
     "express": "^5.2.1",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
